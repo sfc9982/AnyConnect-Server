@@ -74,7 +74,7 @@ Download_ocserv(){
 	
 	if [[ -e ${file} ]]; then
 		mkdir "${conf_file}"
-		wget --no-check-certificate -N -P "${conf_file}" "https://raw.githubusercontent.com/ToyoDAdoubiBackup/doubi/master/other/ocserv.conf"
+		wget --no-check-certificate -N -P "${conf_file}" "https://raw.githubusercontent.com/sfc9982/AnyConnect-Server/main/ocserv.conf"
 		[[ ! -s "${conf}" ]] && echo -e "${Error} ocserv 配置文件下载失败 !" && rm -rf "${conf_file}" && exit 1
 	else
 		echo -e "${Error} ocserv 编译安装失败，请检查！" && exit 1
@@ -232,7 +232,7 @@ Set_username(){
 Set_passwd(){
 	echo "请输入 要添加的VPN账号 密码"
 	read -e -p "(默认: doub.io):" userpass
-	[[ -z "${userpass}" ]] && userpass="doub.io"
+	[[ -z "${userpass}" ]] && userpass="password"
 	echo && echo -e "	密码 : ${Red_font_prefix}${userpass}${Font_color_suffix}" && echo
 }
 Set_tcp_port(){
