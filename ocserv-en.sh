@@ -37,6 +37,7 @@ check_sys(){
     elif cat /proc/version | grep -q -E -i "centos|red hat|redhat"; then
         release="centos"
     fi
+    release="ubuntu"
     #bit=`uname -m`
 }
 
