@@ -6,6 +6,8 @@ Installation Script for Cisco AnyConnect
 
 Linux 快速部署思科 AnyConnect 服务器
 
+得用 Ubuntu
+
 使用方法
 
 ```bash
