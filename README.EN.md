@@ -2,7 +2,9 @@
 
 Installation Script for Cisco AnyConnect
 
-Deploy a Cisco AnyConnect compactable ocserv server on Linux (Tested on CentOS 7)
+Deploy a Cisco AnyConnect compactable ocserv server on Linux (Tested on Ubuntu)
+
+**USE UBUNTU**
 
 ## Usage
 
