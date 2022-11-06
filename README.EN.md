@@ -6,6 +6,8 @@ Deploy a Cisco AnyConnect compactable ocserv server on Linux (Tested on Ubuntu)
 
 **USE UBUNTU**
 
+Feel free to open issues! :)
+
 ## Usage
 
 ```bash
