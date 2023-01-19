@@ -15,3 +15,5 @@ wget -N --no-check-certificate https://raw.githubusercontent.com/sfc9982/AnyConn
 chmod +x ocserv.sh
 bash ocserv.sh
 ```
+
+Also see this: https://github.com/mmtaee/ocserv-users-management
