@@ -8,6 +8,18 @@ Deploy a Cisco AnyConnect compactable ocserv server on Linux (Tested on Ubuntu)
 
 Feel free to open issues! :)
 
+## !!! ⚠️ Warning For People in Iran: 🇮🇷 !!!
+
+Although SSLVPN encrypts its traffic.
+
+Cisco's AnyConnect protocol is **VERY EASY to be DETECTED by your government**.
+
+So if you are a democracy fighter or some stuff like that, **DO NOT USE THIS PROJECT**!!!
+
+(Better run to USA XD)
+
+**(And for those CTOs using my project, I really want a H1B, thank you)**
+
 ## Usage
 
 ```bash
