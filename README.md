@@ -18,7 +18,7 @@ So if you are a democracy fighter or some stuff like that, **DO NOT USE THIS PRO
 
 (Better run to USA XD)
 
-**(And for those CTOs using my project, I really want a H1B, thank you)**
+**(And for those CTOs using my project, I really want a H1B or immigration opportunities, thank you)**
 
 ## Usage /使用方法：
 
