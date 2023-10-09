@@ -20,8 +20,6 @@ So if you are a democracy fighter or some stuff like that, **DO NOT USE THIS PRO
 
 **(And for those CTOs using my project, I really want a H1B or immigration opportunities, thank you)**
 
-**Looking for support of NSF and Young Faculty Award program of the Defense Advanced Research Projects Agency (DARPA).**
-
 ## Usage /使用方法：
 
 ```bash
