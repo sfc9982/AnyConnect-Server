@@ -326,6 +326,7 @@ Add_User(){
     read -rp "Please input the username of VPN account
 (Default: admin): " username
     [[ -z "${username}" ]] && username="admin"
+	sanitize_username "${username}" || { echo -e "${Error} Invalid username"; return 1; }
     echo && echo -e "   Username : ${username}" && echo
     read -rsp "Please input the password of VPN account
 (默认: doub.io): " userpass
@@ -372,15 +373,13 @@ Del_User(){
     read -rp "(Default canceling): " u
     [[ -z "${u}" ]] && echo "Canceled..." && return 1
 
+	sanitize_username "${u}" || { echo -e "${Error} Invalid username"; return 1; }
+
     # Cert side (revoke + remove files, including suspended)
-    Delete_Cert_User <<EOF
-${u}
-EOF
+    Delete_Cert_User "${u}"
 
     # Password side
-    if grep -q "^${u}:*:" "${passwd_file}" 2>/dev/null; then
-      ocpasswd -c "${passwd_file}" -d "${u}" || true
-    fi
+    pw_delete "${u}"
     echo -e "${Info} Deleted user '${u}' (certificate revoked and files removed; password account removed)."
 }
 Modify_User_disabled(){
@@ -389,14 +388,12 @@ Modify_User_disabled(){
     read -rp "(Default canceling): " u
     [[ -z "${u}" ]] && echo "Canceled..." && return 1
 
+	sanitize_username "${u}" || { echo -e "${Error} Invalid username"; return 1; }
+
     if [[ -f "${USERS_DIR}/${u}/${u}.cer" ]]; then
         echo -e "${Info} Suspending certificate and disabling password for '${u}' ..."
-        Suspend_Cert_User <<EOF
-${u}
-EOF
-        if grep -q "^${u}:*:" "${passwd_file}" 2>/dev/null; then
-          ocpasswd -c "${passwd_file}" -l "${u}" || true
-        fi
+        Suspend_Cert_User "${u}"
+        pw_lock "${u}"
         echo -e "${Info} '${u}' is now Disabled (Certificate: Disable, Password: Disable)."
         return 0
     fi
@@ -404,12 +401,8 @@ EOF
     last_dir=$(ls -1dt "${DISABLED_DIR}/${u}-susp-"* 2>/dev/null | head -n1 || true)
     if [[ -n "${last_dir}" ]]; then
         echo -e "${Info} Unsuspending certificate and enabling password for '${u}' ..."
-        Unsuspend_Cert_User <<EOF
-${u}
-EOF
-        if grep -q "^${u}:*:" "${passwd_file}" 2>/dev/null; then
-          ocpasswd -c "${passwd_file}" -u "${u}" || true
-        fi
+        Unsuspend_Cert_User "${u}"
+        pw_unlock "${u}"
         echo -e "${Info} '${u}' is now Enabled (Certificate: Enable, Password: Enable)."
         return 0
     fi
@@ -429,6 +422,21 @@ Set_Pass(){
     esac
 }
 # Helpers for unified manager
+
+sanitize_username() {
+  local u="$1"
+  [[ "$u" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || return 1
+  [[ "$u" != "." && "$u" != ".." ]] || return 1
+  return 0
+}
+pw_user_exists() {
+  local u="$1"
+  [[ -f "${passwd_file}" ]] || return 1
+  awk -F':*:' -v u="$u" '$1==u{found=1} END{exit found?0:1}' "${passwd_file}"
+}
+pw_lock()   { local u="$1"; pw_user_exists "$u" && ocpasswd -c "${passwd_file}" -l "$u" >/dev/null 2>&1; }
+pw_unlock() { local u="$1"; pw_user_exists "$u" && ocpasswd -c "${passwd_file}" -u "$u" >/dev/null 2>&1; }
+pw_delete() { local u="$1"; pw_user_exists "$u" && ocpasswd -c "${passwd_file}" -d "$u" >/dev/null 2>&1; }
 _pw_status(){
     local u="$1"
     if [[ -f "${passwd_file}" ]]; then
@@ -624,9 +632,13 @@ Configure_Auth(){
 }
 # Certificate user management
 Delete_Cert_User(){
-    echo "Delete which username? (revokes active cert first)"
-    read -e -p "(Default canceling): " u
-    [[ -z "${u}" ]] && echo "Canceled..." && exit 1
+    local u="${1:-}"
+    if [[ -z "$u" ]]; then
+      echo "Delete which username? (revokes active cert first)"
+      read -e -p "(Default canceling): " u
+    fi
+    [[ -z "$u" ]] && echo "Canceled..." && return 1
+    sanitize_username "$u" || { echo -e "${Error} Invalid username"; return 1; }
     Ensure_CRL
     added=0
     if [[ -f "${USERS_DIR}/${u}/${u}.cer" ]]; then
@@ -646,9 +658,13 @@ Delete_Cert_User(){
     echo -e "${Info} Deleted ${u} (revocation persists in CRL)."
 }
 Suspend_Cert_User(){
-    echo "Suspend (temporarily disable) which cert username?"
-    read -e -p "(Default canceling): " u
-    [[ -z "${u}" ]] && echo "Canceled..." && return 1
+    local u="${1:-}"
+    if [[ -z "$u" ]]; then
+      echo "Suspend (temporarily disable) which cert username?"
+      read -e -p "(Default canceling): " u
+    fi
+    [[ -z "$u" ]] && echo "Canceled..." && return 1
+    sanitize_username "$u" || { echo -e "${Error} Invalid username"; return 1; }
     user_dir="${USERS_DIR}/${u}"
     [[ ! -f "${user_dir}/${u}.cer" ]] && echo -e "${Error} ${user_dir}/${u}.cer not found" && return 1
     Ensure_CRL
@@ -660,9 +676,13 @@ Suspend_Cert_User(){
     echo -e "${Info} Suspended ${u}."
 }
 Unsuspend_Cert_User(){
-    echo "Unsuspend (re-enable same certificate) which username?"
-    read -e -p "(Default canceling): " u
-    [[ -z "${u}" ]] && echo "Canceled..." && return 1
+    local u="${1:-}"
+    if [[ -z "$u" ]]; then
+      echo "Unsuspend (re-enable same certificate) which username?"
+      read -e -p "(Default canceling): " u
+    fi
+    [[ -z "$u" ]] && echo "Canceled..." && return 1
+    sanitize_username "$u" || { echo -e "${Error} Invalid username"; return 1; }
     last_dir=$(ls -1dt "${DISABLED_DIR}/${u}-susp-"* 2>/dev/null | head -n1 || true)
     [[ -z "${last_dir}" ]] && echo -e "${Error} No suspended archive found for ${u}" && return 1
     mv "${last_dir}" "${USERS_DIR}/${u}"

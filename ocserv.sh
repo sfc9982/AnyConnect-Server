@@ -380,6 +380,22 @@ Read_config(){
 }
 
 # === 统一用户管理：状态/增/删/启用禁用（证书+密码） ===
+
+# --- 安全与账户助手函数 ---
+sanitize_username() {
+  local u="$1"
+  [[ "$u" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || return 1
+  [[ "$u" != "." && "$u" != ".." ]] || return 1
+  return 0
+}
+pw_user_exists() {
+  local u="$1"
+  [[ -f "${passwd_file}" ]] || return 1
+  awk -F':*:' -v u="$u" '$1==u{found=1} END{exit found?0:1}' "${passwd_file}"
+}
+pw_lock()   { local u="$1"; pw_user_exists "$u" && ocpasswd -c "${passwd_file}" -l "$u" >/dev/null 2>&1; }
+pw_unlock() { local u="$1"; pw_user_exists "$u" && ocpasswd -c "${passwd_file}" -u "$u" >/dev/null 2>&1; }
+pw_delete() { local u="$1"; pw_user_exists "$u" && ocpasswd -c "${passwd_file}" -d "$u" >/dev/null 2>&1; }
 _pw_status(){
     local u="$1"
     if [[ -f "${passwd_file}" ]]; then
@@ -430,6 +446,7 @@ Add_User(){
 	read -rp "请输入 要添加的VPN账号 用户名
 (默认: admin): " username
 	[[ -z "${username}" ]] && username="admin"
+	sanitize_username "${username}" || { echo -e "${Error} 用户名不合法"; return 1; }
 	echo && echo -e "   用户名 : ${username}" && echo
 	read -rsp "请输入 要添加的VPN账号 密码
 (默认: doub.io): " userpass
@@ -475,9 +492,13 @@ EOF
 
 # 证书侧：删除（永久吊销）
 Delete_Cert_User(){
-    echo "删除哪个证书用户？（会先吊销）"
-    read -e -p "(默认取消): " u
-    [[ -z "${u}" ]] && echo "已取消..." && exit 1
+    local u="${1:-}"
+    if [[ -z "$u" ]]; then
+      echo "删除哪个证书用户？（会先吊销）"
+      read -e -p "(默认取消): " u
+    fi
+    [[ -z "$u" ]] && echo "已取消..." && return 1
+    sanitize_username "$u" || { echo -e "${Error} 用户名不合法"; return 1; }
     Ensure_CRL
     added=0
     if [[ -f "${USERS_DIR}/${u}/${u}.cer" ]]; then
@@ -499,9 +520,13 @@ Delete_Cert_User(){
 
 # 证书侧：临时禁用/恢复（可复用同一证书）
 Suspend_Cert_User(){
-    echo "临时禁用哪个证书用户？"
-    read -e -p "(默认取消): " u
-    [[ -z "${u}" ]] && echo "已取消..." && return 1
+    local u="${1:-}"
+    if [[ -z "$u" ]]; then
+      echo "临时禁用哪个证书用户？"
+      read -e -p "(默认取消): " u
+    fi
+    [[ -z "$u" ]] && echo "已取消..." && return 1
+    sanitize_username "$u" || { echo -e "${Error} 用户名不合法"; return 1; }
     user_dir="${USERS_DIR}/${u}"
     [[ ! -f "${user_dir}/${u}.cer" ]] && echo -e "${Error} 未找到证书：${user_dir}/${u}.cer" && return 1
     Ensure_CRL
@@ -513,9 +538,13 @@ Suspend_Cert_User(){
     echo -e "${Info} 已临时禁用 ${u}。"
 }
 Unsuspend_Cert_User(){
-    echo "恢复哪个证书用户？（恢复后同一证书可继续使用）"
-    read -e -p "(默认取消): " u
-    [[ -z "${u}" ]] && echo "已取消..." && return 1
+    local u="${1:-}"
+    if [[ -z "$u" ]]; then
+      echo "恢复哪个证书用户？（恢复后同一证书可继续使用）"
+      read -e -p "(默认取消): " u
+    fi
+    [[ -z "$u" ]] && echo "已取消..." && return 1
+    sanitize_username "$u" || { echo -e "${Error} 用户名不合法"; return 1; }
     last_dir=$(ls -1dt "${DISABLED_DIR}/${u}-susp-"* 2>/dev/null | head -n1 || true)
     [[ -z "${last_dir}" ]] && echo -e "${Error} 未找到 ${u} 的临时禁用归档" && return 1
     mv "${last_dir}" "${USERS_DIR}/${u}"
@@ -530,15 +559,13 @@ Del_User(){
 	read -e -p "(默认取消):" Del_username
 	[[ -z "${Del_username}" ]] && echo "已取消..." && return 1
 
+	sanitize_username "${Del_username}" || { echo -e "${Error} 用户名不合法"; return 1; }
+
 	# 证书侧（吊销+删除，含 suspended 归档）
-	Delete_Cert_User <<EOF
-${Del_username}
-EOF
+	Delete_Cert_User "${Del_username}"
 
 	# 密码侧
-	if grep -q "^${Del_username}:*:" "${passwd_file}" 2>/dev/null; then
-	  ocpasswd -c "${passwd_file}" -d "${Del_username}" || true
-	fi
+	pw_delete "${Del_username}"
 	echo -e "${Info} 已删除用户 '${Del_username}'（证书已吊销/清理；密码账户已删除）。"
 }
 
@@ -548,15 +575,13 @@ Modify_User_disabled(){
 	read -e -p "(默认取消):" Modify_username
 	[[ -z "${Modify_username}" ]] && echo "已取消..." && return 1
 
+	sanitize_username "${Modify_username}" || { echo -e "${Error} 用户名不合法"; return 1; }
+
 	# 如果证书启用 -> 临时禁用证书 + 禁用密码
 	if [[ -f "${USERS_DIR}/${Modify_username}/${Modify_username}.cer" ]]; then
 		echo -e "${Info} 正在临时禁用证书并禁用密码：'${Modify_username}' ..."
-		Suspend_Cert_User <<EOF
-${Modify_username}
-EOF
-		if grep -q "^${Modify_username}:*:" "${passwd_file}" 2>/dev/null; then
-		  ocpasswd -c "${passwd_file}" -l "${Modify_username}" || true
-		fi
+		Suspend_Cert_User "${Modify_username}"
+		pw_lock "${Modify_username}"
 		echo -e "${Info} '${Modify_username}' 已禁用（证书：禁用，密码：禁用）。"
 		return 0
 	fi
@@ -565,12 +590,8 @@ EOF
 	last_dir=$(ls -1dt "${DISABLED_DIR}/${Modify_username}-susp-"* 2>/dev/null | head -n1 || true)
 	if [[ -n "${last_dir}" ]]; then
 		echo -e "${Info} 正在恢复证书并启用密码：'${Modify_username}' ..."
-		Unsuspend_Cert_User <<EOF
-${Modify_username}
-EOF
-		if grep -q "^${Modify_username}:*:" "${passwd_file}" 2>/dev/null; then
-		  ocpasswd -c "${passwd_file}" -u "${Modify_username}" || true
-		fi
+		Unsuspend_Cert_User "${Modify_username}"
+		pw_unlock "${Modify_username}"
 		echo -e "${Info} '${Modify_username}' 已启用（证书：启用，密码：启用）。"
 		return 0
 	fi
