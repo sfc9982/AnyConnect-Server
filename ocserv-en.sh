@@ -2,7 +2,7 @@
 PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:~/bin
 export PATH
 
-sh_ver="1.0.6"
+sh_ver="2.0.0"
 file="/usr/local/sbin/ocserv"
 conf_file="/etc/ocserv"
 conf="/etc/ocserv/ocserv.conf"
@@ -11,6 +11,16 @@ log_file="/tmp/ocserv.log"
 ocserv_ver="1.3.0"
 PID_FILE="/var/run/ocserv.pid"
 
+# PKI files and directories
+SSL_DIR="/etc/ocserv/ssl"
+USERS_DIR="${SSL_DIR}/users"
+DISABLED_DIR="${SSL_DIR}/disabled"
+CA_CERT="${SSL_DIR}/ca-cert.pem"
+CA_KEY="${SSL_DIR}/ca-key.pem"
+CRL_PEM="${SSL_DIR}/crl.pem"
+CRL_TMPL="${SSL_DIR}/crl.tmpl"
+REVOKED_PEM="${SSL_DIR}/revoked.pem"
+SUSPENDED_PEM="${SSL_DIR}/suspended.pem"
 Green_font_prefix="\033[32m" && Red_font_prefix="\033[31m" && Green_background_prefix="\033[42;37m" && Red_background_prefix="\033[41;37m" && Font_color_suffix="\033[0m"
 Info="${Green_font_prefix}[INFO]${Font_color_suffix}"
 Error="${Red_font_prefix}[ERROR]${Font_color_suffix}"
@@ -134,7 +144,7 @@ tls_www_server' > server.tmpl
     certtool --generate-certificate --load-privkey server-key.pem --load-ca-certificate ca-cert.pem --load-ca-privkey ca-key.pem --template server.tmpl --outfile server-cert.pem
     [[ $? != 0 ]] && echo -e "${Error} Generate SSL cert file failed (server-cert.pem) !" && over
     
-    mkdir /etc/ocserv/ssl
+    mkdir -p /etc/ocserv/ssl
     mv ca-cert.pem /etc/ocserv/ssl/ca-cert.pem
     mv ca-key.pem /etc/ocserv/ssl/ca-key.pem
     mv server-cert.pem /etc/ocserv/ssl/server-cert.pem
@@ -175,6 +185,9 @@ Install_ocserv(){
     Service_ocserv
     echo -e "${Info} Start to self-sign SSL cert..."
     Generate_SSL
+    echo -e "${Info} Enforcing CRL and certificate-default + password-fallback auth..."
+    Ensure_CRL
+    Configure_Auth
     echo -e "${Info} Start to set account settings..."
     Read_config
     Set_Config
@@ -228,18 +241,6 @@ Set_ocserv(){
         Restart_ocserv
     fi
 }
-Set_username(){
-    echo "Please input the username of VPN account"
-    read -e -p "(Default: admin):" username
-    [[ -z "${username}" ]] && username="admin"
-    echo && echo -e "   Username : ${Red_font_prefix}${username}${Font_color_suffix}" && echo
-}
-Set_passwd(){
-    echo "Please input the password of VPN account"
-    read -e -p "(默认: doub.io):" userpass
-    [[ -z "${userpass}" ]] && userpass="password"
-    echo && echo -e "   Password : ${Red_font_prefix}${userpass}${Font_color_suffix}" && echo
-}
 Set_tcp_port(){
     while true
     do
@@ -279,9 +280,7 @@ Set_udp_port(){
     done
 }
 Set_Config(){
-    Set_username
-    Set_passwd
-    echo -e "${userpass}\n${userpass}"|ocpasswd -c ${passwd_file} ${username}
+    Add_User
     Set_tcp_port
     Set_udp_port
     sed -i 's/tcp-port = '"$(echo ${tcp_port})"'/tcp-port = '"$(echo ${set_tcp_port})"'/g' ${conf}
@@ -296,107 +295,154 @@ Read_config(){
     max_clients=$(echo -e "${conf_text}"|grep "max-clients ="|awk -F ' = ' '{print $NF}')
 }
 List_User(){
-    [[ ! -e ${passwd_file} ]] && echo -e "${Error} ocserv account config file doesn't exist !" && exit 1
-    User_text=$(cat ${passwd_file})
-    if [[ ! -z ${User_text} ]]; then
-        User_num=$(echo -e "${User_text}"|wc -l)
-        user_list_all=""
-        for((integer = 1; integer <= ${User_num}; integer++))
-        do
-            user_name=$(echo -e "${User_text}" | awk -F ':*:' '{print $1}' | sed -n "${integer}p")
-            user_status=$(echo -e "${User_text}" | awk -F ':*:' '{print $NF}' | sed -n "${integer}p"|cut -c 1)
-            if [[ ${user_status} == '!' ]]; then
-                user_status="Disable"
-            else
-                user_status="Enable"
-            fi
-            user_list_all=${user_list_all}"Username: "${user_name}" Account status: "${user_status}"\n"
-        done
-        echo && echo -e "Total user ${Green_font_prefix}"${User_num}"${Font_color_suffix}"
-        echo -e ${user_list_all}
+    declare -A seen
+    if [[ -f "${passwd_file}" ]]; then
+        while IFS='' read -r line; do
+            u=$(echo "$line" | awk -F':*:' '{print $1}')
+            [[ -n "$u" ]] && seen["$u"]=1
+        done < "${passwd_file}"
     fi
+    if [[ -d "${USERS_DIR}" ]]; then
+        for d in $(find "${USERS_DIR}" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null); do
+            seen["$d"]=1
+        done
+    fi
+    if [[ -d "${DISABLED_DIR}" ]]; then
+        for d in $(find "${DISABLED_DIR}" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null); do
+            u="${d%%-susp-*}"; [[ -n "$u" ]] && seen["$u"]=1
+        done
+    fi
+    if [[ ${#seen[@]} -eq 0 ]]; then echo -e "${Tip} No users yet."; return; fi
+    for u in $(printf "%s\n" "${!seen[@]}" | sort); do
+        pw=$(_pw_status "$u")
+        if _cert_enabled "$u"; then cert="Enable"
+        elif _cert_suspended "$u"; then cert="Disable"
+        else cert="Disable"; fi
+        [[ "$pw" == "Enable" || "$cert" == "Enable" ]] && acc="Enable" || acc="Disable"
+        echo "Username: ${u} Account status: ${acc} Certificate: ${cert} Password: ${pw}"
+    done
 }
 Add_User(){
-    Set_username
-    Set_passwd
-    user_status=$(cat "${passwd_file}"|grep "${username}"':*:')
-    [[ ! -z ${user_status} ]] && echo -e "${Error} Username is already exist ![ ${username} ]" && exit 1
-    echo -e "${userpass}\n${userpass}"|ocpasswd -c ${passwd_file} ${username}
-    user_status=$(cat "${passwd_file}"|grep "${username}"':*:')
-    if [[ ! -z ${user_status} ]]; then
-        echo -e "${Info} Adding account successfully ![ ${username} ]"
-    else
-        echo -e "${Error} Adding account failed ![ ${username} ]" && exit 1
-    fi
+    read -rp "Please input the username of VPN account
+(Default: admin): " username
+    [[ -z "${username}" ]] && username="admin"
+    echo && echo -e "   Username : ${username}" && echo
+    read -rsp "Please input the password of VPN account
+(默认: doub.io): " userpass
+    echo
+    [[ -z "${userpass}" ]] && userpass="doub.io"
+
+    mkdir -p "$(dirname "${passwd_file}")"
+    printf "%s\n%s\n" "${userpass}" "${userpass}" | ocpasswd -c "${passwd_file}" "${username}"
+
+    Ensure_CRL
+    user_dir="${USERS_DIR}/${username}"
+    mkdir -p "${user_dir}"; chmod 700 "${user_dir}"
+    certtool --generate-privkey --outfile "${user_dir}/${username}-key.pem"
+    cat > "${user_dir}/${username}.tmpl" <<EOF
+cn = "${username}"
+tls_www_client
+encryption_key
+signing_key
+expiration_days = 825
+EOF
+    certtool --generate-certificate \
+      --load-privkey "${user_dir}/${username}-key.pem" \
+      --load-ca-certificate "${CA_CERT}" \
+      --load-ca-privkey "${CA_KEY}" \
+      --template "${user_dir}/${username}.tmpl" \
+      --outfile "${user_dir}/${username}.cer"
+
+    openssl pkcs12 -export \
+      -inkey "${user_dir}/${username}-key.pem" \
+      -in "${user_dir}/${username}.cer" \
+      -certfile "${CA_CERT}" \
+      -name "AnyConnect VPN – ${username}" \
+      -out "${user_dir}/${username}.p12" \
+      -passout pass:"${userpass}"
+
+    chmod 600 "${user_dir}/${username}-key.pem" "${user_dir}/${username}.p12"
+    echo -e "${Info} Created user '${username}' with certificate and password."
+    echo "  ${user_dir}/${username}.p12   (import to device; password: ${userpass})"
+    echo "  ${CA_CERT} (install/trust if prompted)"
 }
 Del_User(){
     List_User
-    [[ ${User_num} == 1 ]] && echo -e "${Error} Only one account remain, unable to delete !" && exit 1
-    echo -e "Please input username of account to delete"
-    read -e -p "(Default canceling):" Del_username
-    [[ -z "${Del_username}" ]] && echo "Canceled..." && exit 1
-    user_status=$(cat "${passwd_file}"|grep "${Del_username}"':*:')
-    [[ -z ${user_status} ]] && echo -e "${Error} username doesn't exist ! [${Del_username}]" && exit 1
-    ocpasswd -c ${passwd_file} -d ${Del_username}
-    user_status=$(cat "${passwd_file}"|grep "${Del_username}"':*:')
-    if [[ -z ${user_status} ]]; then
-        echo -e "${Info} Deleted ! [${Del_username}]"
-    else
-        echo -e "${Error} Deletion failed ! [${Del_username}]" && exit 1
+    echo "Please input username of account to delete"
+    read -rp "(Default canceling): " u
+    [[ -z "${u}" ]] && echo "Canceled..." && return 1
+
+    # Cert side (revoke + remove files, including suspended)
+    Delete_Cert_User <<EOF
+${u}
+EOF
+
+    # Password side
+    if grep -q "^${u}:*:" "${passwd_file}" 2>/dev/null; then
+      ocpasswd -c "${passwd_file}" -d "${u}" || true
     fi
+    echo -e "${Info} Deleted user '${u}' (certificate revoked and files removed; password account removed)."
 }
 Modify_User_disabled(){
-    List_User
-    echo -e "Please type Enable/Disable VPN account username"
-    read -e -p "(Default canceling):" Modify_username
-    [[ -z "${Modify_username}" ]] && echo "Canceled..." && exit 1
-    user_status=$(cat "${passwd_file}"|grep "${Modify_username}"':*:')
-    [[ -z ${user_status} ]] && echo -e "${Error} username doesn't exist ! [${Modify_username}]" && exit 1
-    user_status=$(cat "${passwd_file}" | grep "${Modify_username}"':*:' | awk -F ':*:' '{print $NF}' |cut -c 1)
-    if [[ ${user_status} == '!' ]]; then
-            ocpasswd -c ${passwd_file} -u ${Modify_username}
-            user_status=$(cat "${passwd_file}" | grep "${Modify_username}"':*:' | awk -F ':*:' '{print $NF}' |cut -c 1)
-            if [[ ${user_status} != '!' ]]; then
-                echo -e "${Info} Enable successed ! [${Modify_username}]"
-            else
-                echo -e "${Error} Enable failed ! [${Modify_username}]" && exit 1
-            fi
-        else
-            ocpasswd -c ${passwd_file} -l ${Modify_username}
-            user_status=$(cat "${passwd_file}" | grep "${Modify_username}"':*:' | awk -F ':*:' '{print $NF}' |cut -c 1)
-            if [[ ${user_status} == '!' ]]; then
-                echo -e "${Info} Disable successed ! [${Modify_username}]"
-            else
-                echo -e "${Error} Disable failed ! [${Modify_username}]" && exit 1
-            fi
+  List_User
+    echo "Please type Enable/Disable VPN account username"
+    read -rp "(Default canceling): " u
+    [[ -z "${u}" ]] && echo "Canceled..." && return 1
+
+    if [[ -f "${USERS_DIR}/${u}/${u}.cer" ]]; then
+        echo -e "${Info} Suspending certificate and disabling password for '${u}' ..."
+        Suspend_Cert_User <<EOF
+${u}
+EOF
+        if grep -q "^${u}:*:" "${passwd_file}" 2>/dev/null; then
+          ocpasswd -c "${passwd_file}" -l "${u}" || true
         fi
+        echo -e "${Info} '${u}' is now Disabled (Certificate: Disable, Password: Disable)."
+        return 0
+    fi
+
+    last_dir=$(ls -1dt "${DISABLED_DIR}/${u}-susp-"* 2>/dev/null | head -n1 || true)
+    if [[ -n "${last_dir}" ]]; then
+        echo -e "${Info} Unsuspending certificate and enabling password for '${u}' ..."
+        Unsuspend_Cert_User <<EOF
+${u}
+EOF
+        if grep -q "^${u}:*:" "${passwd_file}" 2>/dev/null; then
+          ocpasswd -c "${passwd_file}" -u "${u}" || true
+        fi
+        echo -e "${Info} '${u}' is now Enabled (Certificate: Enable, Password: Enable)."
+        return 0
+    fi
+
+    echo -e "${Tip} No certificate found for '${u}'. Add the user first."
 }
 Set_Pass(){
     check_installed_status
-    echo && echo -e " What wanna you do?
-    
- ${Green_font_prefix} 0.${Font_color_suffix} List users
-————————
- ${Green_font_prefix} 1.${Font_color_suffix} Add users
- ${Green_font_prefix} 2.${Font_color_suffix} Delete users
-————————
- ${Green_font_prefix} 3.${Font_color_suffix} Enable/Disable users
- 
- NOTICE：After these operations, restart is NOT needed !" && echo
-    read -e -p "(Default: Cancel):" set_num
-    [[ -z "${set_num}" ]] && echo "Canceled..." && exit 1
-    if [[ ${set_num} == "0" ]]; then
-        List_User
-    elif [[ ${set_num} == "1" ]]; then
-        Add_User
-    elif [[ ${set_num} == "2" ]]; then
-        Del_User
-    elif [[ ${set_num} == "3" ]]; then
-        Modify_User_disabled
-    else
-        echo -e "${Error} Please input a valid number[1-3]" && exit 1
-    fi
+    echo -e "\n What wanna you do?\n\n  0. List users\n————————\n  1. Add users\n  2. Delete users\n————————\n  3. Enable/Disable users\n"
+    read -e -p "Choice [0-3]: " set_num
+    case "$set_num" in
+      0) List_User ;;
+      1) Add_User ;;
+      2) Del_User ;;
+      3) Modify_User_disabled ;;
+      *) echo "Canceled..." ;;
+    esac
 }
+# Helpers for unified manager
+_pw_status(){
+    local u="$1"
+    if [[ -f "${passwd_file}" ]]; then
+        local line; line=$(awk -F':*:' -v u="$u" '$1==u {print $0}' "${passwd_file}")
+        if [[ -n "$line" ]]; then
+            local st; st=$(echo "$line" | awk -F':*:' '{print $NF}' | cut -c1)
+            [[ "$st" == "!" ]] && echo "Disable" || echo "Enable"
+            return
+        fi
+    fi
+    echo "Disable"
+}
+_cert_enabled(){ [[ -f "${USERS_DIR}/$1/$1.cer" ]]; }
+_cert_suspended(){ ls -1 "${DISABLED_DIR}/$1-susp-"* >/dev/null 2>&1; }
 View_Config(){
     Get_ip
     Read_config
@@ -502,6 +548,128 @@ Set_iptables(){
     echo -e '#!/bin/bash\n/sbin/iptables-restore < /etc/iptables.up.rules' > /etc/network/if-pre-up.d/iptables
     chmod +x /etc/network/if-pre-up.d/iptables
 }
+# Ensure CRL files exist and minimal template
+Ensure_CRL(){
+    mkdir -p "${SSL_DIR}" "${USERS_DIR}" "${DISABLED_DIR}"
+    [[ ! -f "${CRL_TMPL}" ]] && echo -e "crl_next_update = 365\ncrl_number = 1" > "${CRL_TMPL}"
+    touch "${REVOKED_PEM}" "${SUSPENDED_PEM}"
+    if [[ ! -f "${CRL_PEM}" ]]; then
+        certtool --generate-crl \
+            --load-ca-privkey "${CA_KEY}" \
+            --load-ca-certificate "${CA_CERT}" \
+            --template "${CRL_TMPL}" \
+            --outfile "${CRL_PEM}" >/dev/null 2>&1
+    fi
+}
+# Rebuild suspended list from disabled/*-susp-* directories
+Rebuild_SUSPENDED_PEM(){
+    : > "${SUSPENDED_PEM}"
+    if [[ -d "${DISABLED_DIR}" ]]; then
+        shopt -s nullglob
+        for d in "${DISABLED_DIR}"/*-susp-*; do
+            base="$(basename "$d")"
+            u="${base%%-susp-*}"
+            if [[ -f "${d}/${u}.cer" ]]; then
+                cat "${d}/${u}.cer" >> "${SUSPENDED_PEM}"
+            fi
+        done
+        shopt -u nullglob
+    fi
+}
+# Rebuild CRL from permanent + suspended lists
+Rebuild_CRL(){
+    tmp="${SSL_DIR}/.crl-input.tmp"
+    : > "${tmp}"
+    [[ -s "${REVOKED_PEM}" ]] && cat "${REVOKED_PEM}" >> "${tmp}"
+    [[ -s "${SUSPENDED_PEM}" ]] && cat "${SUSPENDED_PEM}" >> "${tmp}"
+    if [[ -s "${tmp}" ]]; then
+        certtool --generate-crl \
+          --load-ca-privkey "${CA_KEY}" \
+          --load-ca-certificate "${CA_CERT}" \
+          --template "${CRL_TMPL}" \
+          --load-certificate "${tmp}" \
+          --outfile "${CRL_PEM}"
+    else
+        certtool --generate-crl \
+          --load-ca-privkey "${CA_KEY}" \
+          --load-ca-certificate "${CA_CERT}" \
+          --template "${CRL_TMPL}" \
+          --outfile "${CRL_PEM}"
+    fi
+    rm -f "${tmp}"
+    [[ -e ${PID_FILE} ]] && kill -HUP $(cat ${PID_FILE}) 2>/dev/null
+}
+# Configure auth to certificate default + plain fallback (OR)
+Configure_Auth(){
+    [[ ! -e ${conf} ]] && echo -e "${Error} ocserv config file doesn't exist !" && exit 1
+    # ensure CA + CRL paths
+    if grep -qE '^\s*ca-cert\s*=' "${conf}"; then
+        sed -i "s|^\s*ca-cert\s*=.*|ca-cert = ${CA_CERT}|" "${conf}"
+    else
+        sed -i "1ica-cert = ${CA_CERT}" "${conf}"
+    fi
+    if grep -qE '^\s*crl\s*=' "${conf}"; then
+        sed -i "s|^\s*crl\s*=.*|crl = ${CRL_PEM}|" "${conf}"
+    else
+        sed -i "1icrl = ${CRL_PEM}" "${conf}"
+    fi
+    # username mapping from CN
+    grep -qE '^\s*cert-user-oid\s*=' "${conf}" || sed -i "1icert-user-oid = 2.5.4.3" "${conf}"
+    # configure auth (remove existing auth/enable-auth to avoid duplicates)
+    sed -i '/^\s*auth\s*= /d' "${conf}"
+    sed -i '/^\s*enable-auth\s*= /d' "${conf}"
+    sed -i '1iauth = "certificate"' "${conf}"
+    sed -i '1ienable-auth = "plain[passwd=/etc/ocserv/ocpasswd]"' "${conf}"
+    echo -e "${Info} Enabled certificate default + password fallback in ${conf}"
+}
+# Certificate user management
+Delete_Cert_User(){
+    echo "Delete which username? (revokes active cert first)"
+    read -e -p "(Default canceling): " u
+    [[ -z "${u}" ]] && echo "Canceled..." && exit 1
+    Ensure_CRL
+    added=0
+    if [[ -f "${USERS_DIR}/${u}/${u}.cer" ]]; then
+        cat "${USERS_DIR}/${u}/${u}.cer" >> "${REVOKED_PEM}"
+        rm -rf "${USERS_DIR}/${u}"
+        added=1
+    fi
+    shopt -s nullglob
+    for d in "${DISABLED_DIR}/${u}-susp-"*; do
+        [[ -f "${d}/${u}.cer" ]] && cat "${d}/${u}.cer" >> "${REVOKED_PEM}" && rm -rf "${d}" && added=1
+    done
+    shopt -u nullglob
+    if [[ $added -eq 1 ]]; then
+        Rebuild_SUSPENDED_PEM
+        Rebuild_CRL
+    fi
+    echo -e "${Info} Deleted ${u} (revocation persists in CRL)."
+}
+Suspend_Cert_User(){
+    echo "Suspend (temporarily disable) which cert username?"
+    read -e -p "(Default canceling): " u
+    [[ -z "${u}" ]] && echo "Canceled..." && return 1
+    user_dir="${USERS_DIR}/${u}"
+    [[ ! -f "${user_dir}/${u}.cer" ]] && echo -e "${Error} ${user_dir}/${u}.cer not found" && return 1
+    Ensure_CRL
+    ts=$(date +%Y%m%d-%H%M%S)
+    mkdir -p "${DISABLED_DIR}"
+    mv "${user_dir}" "${DISABLED_DIR}/${u}-susp-${ts}"
+    Rebuild_SUSPENDED_PEM
+    Rebuild_CRL
+    echo -e "${Info} Suspended ${u}."
+}
+Unsuspend_Cert_User(){
+    echo "Unsuspend (re-enable same certificate) which username?"
+    read -e -p "(Default canceling): " u
+    [[ -z "${u}" ]] && echo "Canceled..." && return 1
+    last_dir=$(ls -1dt "${DISABLED_DIR}/${u}-susp-"* 2>/dev/null | head -n1 || true)
+    [[ -z "${last_dir}" ]] && echo -e "${Error} No suspended archive found for ${u}" && return 1
+    mv "${last_dir}" "${USERS_DIR}/${u}"
+    Rebuild_SUSPENDED_PEM
+    Rebuild_CRL
+    echo -e "${Info} Unsuspended ${u}."
+}
 Update_Shell(){
     sh_new_ver=$(wget --no-check-certificate -qO- -t1 -T3 "https://raw.githubusercontent.com/ToyoDAdoubiBackup/doubi/master/ocserv.sh"|grep 'sh_ver="'|awk -F "=" '{print $NF}'|sed 's/\"//g'|head -1) && sh_new_type="github"
     [[ -z ${sh_new_ver} ]] && echo -e "${Error} Unable to connect to Github !" && exit 0
@@ -526,7 +694,7 @@ echo && echo -e " ocserv 1key install and conf script ${Red_font_prefix}[v${sh_v
  ${Green_font_prefix}4.${Font_color_suffix} Stop ocserv
  ${Green_font_prefix}5.${Font_color_suffix} Restart ocserv
 ————————————
- ${Green_font_prefix}6.${Font_color_suffix} Set account conf
+ ${Green_font_prefix}6.${Font_color_suffix} Manage users
  ${Green_font_prefix}7.${Font_color_suffix} View conf
  ${Green_font_prefix}8.${Font_color_suffix} Edit config file 
  ${Green_font_prefix}9.${Font_color_suffix} View log
@@ -578,4 +746,3 @@ case "$num" in
     echo "Please input current number [0-9]"
     ;;
 esac
-set 限制解除 
