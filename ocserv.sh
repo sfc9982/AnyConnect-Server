@@ -2,7 +2,7 @@
 PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:~/bin
 export PATH
 
-sh_ver="1.0.6"
+sh_ver="2.0.0"
 file="/usr/local/sbin/ocserv"
 conf_file="/etc/ocserv"
 conf="/etc/ocserv/ocserv.conf"
@@ -10,6 +10,17 @@ passwd_file="/etc/ocserv/ocpasswd"
 log_file="/tmp/ocserv.log"
 ocserv_ver="1.3.0"
 PID_FILE="/var/run/ocserv.pid"
+
+# === PKI/CRL 文件与目录（新增，匹配 ocserv-en.sh）===
+SSL_DIR="/etc/ocserv/ssl"
+USERS_DIR="${SSL_DIR}/users"
+DISABLED_DIR="${SSL_DIR}/disabled"
+CA_CERT="${SSL_DIR}/ca-cert.pem"
+CA_KEY="${SSL_DIR}/ca-key.pem"
+CRL_PEM="${SSL_DIR}/crl.pem"
+CRL_TMPL="${SSL_DIR}/crl.tmpl"
+REVOKED_PEM="${SSL_DIR}/revoked.pem"
+SUSPENDED_PEM="${SSL_DIR}/suspended.pem"
 
 Green_font_prefix="\033[32m" && Red_font_prefix="\033[31m" && Green_background_prefix="\033[42;37m" && Red_background_prefix="\033[41;37m" && Font_color_suffix="\033[0m"
 Info="${Green_font_prefix}[信息]${Font_color_suffix}"
@@ -129,7 +140,7 @@ tls_www_server' > server.tmpl
 	certtool --generate-certificate --load-privkey server-key.pem --load-ca-certificate ca-cert.pem --load-ca-privkey ca-key.pem --template server.tmpl --outfile server-cert.pem
 	[[ $? != 0 ]] && echo -e "${Error} 生成SSL证书文件失败(server-cert.pem) !" && over
 	
-	mkdir /etc/ocserv/ssl
+	mkdir -p /etc/ocserv/ssl
 	mv ca-cert.pem /etc/ocserv/ssl/ca-cert.pem
 	mv ca-key.pem /etc/ocserv/ssl/ca-key.pem
 	mv server-cert.pem /etc/ocserv/ssl/server-cert.pem
@@ -159,6 +170,79 @@ Installation_dependency(){
 		apt-get install vim net-tools pkg-config build-essential libgnutls28-dev libwrap0-dev liblz4-dev libseccomp-dev libreadline-dev libnl-nf-3-dev libev-dev gnutls-bin ipcalc ipcalc-ng -y
 	fi
 }
+
+# === 新增：CRL/证书认证 相关函数（与 ocserv-en.sh 对齐） ===
+Ensure_CRL(){
+    mkdir -p "${SSL_DIR}" "${USERS_DIR}" "${DISABLED_DIR}"
+    [[ ! -f "${CRL_TMPL}" ]] && echo -e "crl_next_update = 365\ncrl_number = 1" > "${CRL_TMPL}"
+    touch "${REVOKED_PEM}" "${SUSPENDED_PEM}"
+    if [[ ! -f "${CRL_PEM}" ]]; then
+        certtool --generate-crl \
+            --load-ca-privkey "${CA_KEY}" \
+            --load-ca-certificate "${CA_CERT}" \
+            --template "${CRL_TMPL}" \
+            --outfile "${CRL_PEM}" >/dev/null 2>&1
+    fi
+}
+Rebuild_SUSPENDED_PEM(){
+    : > "${SUSPENDED_PEM}"
+    if [[ -d "${DISABLED_DIR}" ]]; then
+        shopt -s nullglob
+        for d in "${DISABLED_DIR}"/*-susp-*; do
+            base="$(basename "$d")"
+            u="${base%%-susp-*}"
+            if [[ -f "${d}/${u}.cer" ]]; then
+                cat "${d}/${u}.cer" >> "${SUSPENDED_PEM}"
+            fi
+        done
+        shopt -u nullglob
+    fi
+}
+Rebuild_CRL(){
+    tmp="${SSL_DIR}/.crl-input.tmp"
+    : > "${tmp}"
+    [[ -s "${REVOKED_PEM}" ]] && cat "${REVOKED_PEM}" >> "${tmp}"
+    [[ -s "${SUSPENDED_PEM}" ]] && cat "${SUSPENDED_PEM}" >> "${tmp}"
+    if [[ -s "${tmp}" ]]; then
+        certtool --generate-crl \
+          --load-ca-privkey "${CA_KEY}" \
+          --load-ca-certificate "${CA_CERT}" \
+          --template "${CRL_TMPL}" \
+          --load-certificate "${tmp}" \
+          --outfile "${CRL_PEM}"
+    else
+        certtool --generate-crl \
+          --load-ca-privkey "${CA_KEY}" \
+          --load-ca-certificate "${CA_CERT}" \
+          --template "${CRL_TMPL}" \
+          --outfile "${CRL_PEM}"
+    fi
+    rm -f "${tmp}"
+    [[ -e ${PID_FILE} ]] && kill -HUP $(cat ${PID_FILE}) 2>/dev/null
+}
+Configure_Auth(){
+    [[ ! -e ${conf} ]] && echo -e "${Error} ocserv 配置文件不存在 !" && exit 1
+    # 确保 CA/CRL 路径
+    if grep -qE '^\s*ca-cert\s*=' "${conf}"; then
+        sed -i "s|^\s*ca-cert\s*=.*|ca-cert = ${CA_CERT}|" "${conf}"
+    else
+        sed -i "1ica-cert = ${CA_CERT}" "${conf}"
+    fi
+    if grep -qE '^\s*crl\s*=' "${conf}"; then
+        sed -i "s|^\s*crl\s*=.*|crl = ${CRL_PEM}|" "${conf}"
+    else
+        sed -i "1icrl = ${CRL_PEM}" "${conf}"
+    fi
+    # 用户名从证书 CN 提取
+    grep -qE '^\s*cert-user-oid\s*=' "${conf}" || sed -i "1icert-user-oid = 2.5.4.3" "${conf}"
+    # 证书优先 + 密码备用（避免重复项）
+    sed -i '/^\s*auth\s*= /d' "${conf}"
+    sed -i '/^\s*enable-auth\s*= /d' "${conf}"
+    sed -i '1iauth = "certificate"' "${conf}"
+    sed -i '1ienable-auth = "plain[passwd=/etc/ocserv/ocpasswd]"' "${conf}"
+    echo -e "${Info} 已启用 证书默认 + 密码备用 认证模式"
+}
+
 Install_ocserv(){
 	check_root
 	[[ -e ${file} ]] && echo -e "${Error} ocserv 已安装，请检查 !" && exit 1
@@ -170,6 +254,10 @@ Install_ocserv(){
 	Service_ocserv
 	echo -e "${Info} 开始自签SSL证书..."
 	Generate_SSL
+	# 新增：安装后立刻启用 CRL + 证书优先+密码备用
+	echo -e "${Info} 启用 CRL 并设置 证书优先 + 密码备用..."
+	Ensure_CRL
+	Configure_Auth
 	echo -e "${Info} 开始设置账号配置..."
 	Read_config
 	Set_Config
@@ -273,10 +361,10 @@ Set_udp_port(){
 	fi
 	done
 }
+# 安装流程里，首次账号：用统一新增（证书+密码）
 Set_Config(){
-	Set_username
-	Set_passwd
-	echo -e "${userpass}\n${userpass}"|ocpasswd -c ${passwd_file} ${username}
+	# 兼容性保留：可直接调用新增用户（会创建证书+密码）
+	Add_User
 	Set_tcp_port
 	Set_udp_port
 	sed -i 's/tcp-port = '"$(echo ${tcp_port})"'/tcp-port = '"$(echo ${set_tcp_port})"'/g' ${conf}
@@ -290,82 +378,227 @@ Read_config(){
 	max_same_clients=$(echo -e "${conf_text}"|grep "max-same-clients ="|awk -F ' = ' '{print $NF}')
 	max_clients=$(echo -e "${conf_text}"|grep "max-clients ="|awk -F ' = ' '{print $NF}')
 }
+
+# === 统一用户管理：状态/增/删/启用禁用（证书+密码） ===
+
+# --- 安全与账户助手函数 ---
+sanitize_username() {
+  local u="$1"
+  [[ "$u" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || return 1
+  [[ "$u" != "." && "$u" != ".." ]] || return 1
+  return 0
+}
+pw_user_exists() {
+  local u="$1"
+  [[ -f "${passwd_file}" ]] || return 1
+  awk -F':*:' -v u="$u" '$1==u{found=1} END{exit found?0:1}' "${passwd_file}"
+}
+pw_lock()   { local u="$1"; pw_user_exists "$u" && ocpasswd -c "${passwd_file}" -l "$u" >/dev/null 2>&1; }
+pw_unlock() { local u="$1"; pw_user_exists "$u" && ocpasswd -c "${passwd_file}" -u "$u" >/dev/null 2>&1; }
+pw_delete() { local u="$1"; pw_user_exists "$u" && ocpasswd -c "${passwd_file}" -d "$u" >/dev/null 2>&1; }
+_pw_status(){
+    local u="$1"
+    if [[ -f "${passwd_file}" ]]; then
+        local line; line=$(awk -F':*:' -v u="$u" '$1==u {print $0}' "${passwd_file}")
+        if [[ -n "$line" ]]; then
+            local st; st=$(echo "$line" | awk -F':*:' '{print $NF}' | cut -c1)
+            [[ "$st" == "!" ]] && echo "禁用" || echo "启用"
+            return
+        fi
+    fi
+    echo "禁用"
+}
+_cert_enabled(){ [[ -f "${USERS_DIR}/$1/$1.cer" ]]; }
+_cert_suspended(){ ls -1 "${DISABLED_DIR}/$1-susp-"* >/dev/null 2>&1; }
+
 List_User(){
-	[[ ! -e ${passwd_file} ]] && echo -e "${Error} ocserv 账号配置文件不存在 !" && exit 1
-	User_text=$(cat ${passwd_file})
-	if [[ ! -z ${User_text} ]]; then
-		User_num=$(echo -e "${User_text}"|wc -l)
-		user_list_all=""
-		for((integer = 1; integer <= ${User_num}; integer++))
-		do
-			user_name=$(echo -e "${User_text}" | awk -F ':*:' '{print $1}' | sed -n "${integer}p")
-			user_status=$(echo -e "${User_text}" | awk -F ':*:' '{print $NF}' | sed -n "${integer}p"|cut -c 1)
-			if [[ ${user_status} == '!' ]]; then
-				user_status="禁用"
-			else
-				user_status="启用"
-			fi
-			user_list_all=${user_list_all}"用户名: "${user_name}" 账号状态: "${user_status}"\n"
+	# 合并 ocpasswd + 证书目录 + disabled 归档 的用户集合
+	declare -A seen
+	if [[ -f "${passwd_file}" ]]; then
+		while IFS='' read -r line; do
+			u=$(echo "$line" | awk -F':*:' '{print $1}')
+			[[ -n "$u" ]] && seen["$u"]=1
+		done < "${passwd_file}"
+	fi
+	if [[ -d "${USERS_DIR}" ]]; then
+		for d in $(find "${USERS_DIR}" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null); do
+			seen["$d"]=1
 		done
-		echo && echo -e "用户总数 ${Green_font_prefix}"${User_num}"${Font_color_suffix}"
-		echo -e ${user_list_all}
 	fi
+	if [[ -d "${DISABLED_DIR}" ]]; then
+		for d in $(find "${DISABLED_DIR}" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null); do
+			u="${d%%-susp-*}"; [[ -n "$u" ]] && seen["$u"]=1
+		done
+	fi
+	if [[ ${#seen[@]} -eq 0 ]]; then echo -e "${Tip} 暂无用户。"; return; fi
+	for u in $(printf "%s\n" "${!seen[@]}" | sort); do
+		pw=$(_pw_status "$u")
+		if _cert_enabled "$u"; then cert="启用"
+		elif _cert_suspended "$u"; then cert="禁用"
+		else cert="禁用"; fi
+		[[ "$pw" == "启用" || "$cert" == "启用" ]] && acc="启用" || acc="禁用"
+		echo "用户名: ${u} 账号状态: ${acc} 证书: ${cert} 密码: ${pw}"
+	done
 }
+
 Add_User(){
-	Set_username
-	Set_passwd
-	user_status=$(cat "${passwd_file}"|grep "${username}"':*:')
-	[[ ! -z ${user_status} ]] && echo -e "${Error} 用户名已存在 ![ ${username} ]" && exit 1
-	echo -e "${userpass}\n${userpass}"|ocpasswd -c ${passwd_file} ${username}
-	user_status=$(cat "${passwd_file}"|grep "${username}"':*:')
-	if [[ ! -z ${user_status} ]]; then
-		echo -e "${Info} 账号添加成功 ![ ${username} ]"
-	else
-		echo -e "${Error} 账号添加失败 ![ ${username} ]" && exit 1
-	fi
+	# 统一新增：创建 证书 + 密码（同名/同密码）
+	read -rp "请输入 要添加的VPN账号 用户名
+(默认: admin): " username
+	[[ -z "${username}" ]] && username="admin"
+	sanitize_username "${username}" || { echo -e "${Error} 用户名不合法"; return 1; }
+	echo && echo -e "   用户名 : ${username}" && echo
+	read -rsp "请输入 要添加的VPN账号 密码
+(默认: doub.io): " userpass
+	echo
+	[[ -z "${userpass}" ]] && userpass="doub.io"
+
+	# 密码账户
+	mkdir -p "$(dirname "${passwd_file}")"
+	printf "%s\n%s\n" "${userpass}" "${userpass}" | ocpasswd -c "${passwd_file}" "${username}"
+
+	# 证书账户
+	Ensure_CRL
+	user_dir="${USERS_DIR}/${username}"
+	mkdir -p "${user_dir}"; chmod 700 "${user_dir}"
+	certtool --generate-privkey --outfile "${user_dir}/${username}-key.pem"
+	cat > "${user_dir}/${username}.tmpl" <<EOF
+cn = "${username}"
+tls_www_client
+encryption_key
+signing_key
+expiration_days = 825
+EOF
+	certtool --generate-certificate \
+	  --load-privkey "${user_dir}/${username}-key.pem" \
+	  --load-ca-certificate "${CA_CERT}" \
+	  --load-ca-privkey "${CA_KEY}" \
+	  --template "${user_dir}/${username}.tmpl" \
+	  --outfile "${user_dir}/${username}.cer"
+
+	openssl pkcs12 -export \
+	  -inkey "${user_dir}/${username}-key.pem" \
+	  -in "${user_dir}/${username}.cer" \
+	  -certfile "${CA_CERT}" \
+	  -name "AnyConnect VPN – ${username}" \
+	  -out "${user_dir}/${username}.p12" \
+	  -passout pass:"${userpass}"
+
+	chmod 600 "${user_dir}/${username}-key.pem" "${user_dir}/${username}.p12"
+	echo -e "${Info} 已创建用户 '${username}' 的 证书 + 密码。"
+	echo "  ${user_dir}/${username}.p12   (导入到设备；密码: ${userpass})"
+	echo "  ${CA_CERT} (若提示，请信任/安装根证书)"
 }
+
+# 证书侧：删除（永久吊销）
+Delete_Cert_User(){
+    local u="${1:-}"
+    if [[ -z "$u" ]]; then
+      echo "删除哪个证书用户？（会先吊销）"
+      read -e -p "(默认取消): " u
+    fi
+    [[ -z "$u" ]] && echo "已取消..." && return 1
+    sanitize_username "$u" || { echo -e "${Error} 用户名不合法"; return 1; }
+    Ensure_CRL
+    added=0
+    if [[ -f "${USERS_DIR}/${u}/${u}.cer" ]]; then
+        cat "${USERS_DIR}/${u}/${u}.cer" >> "${REVOKED_PEM}"
+        rm -rf "${USERS_DIR}/${u}"
+        added=1
+    fi
+    shopt -s nullglob
+    for d in "${DISABLED_DIR}/${u}-susp-"*; do
+        [[ -f "${d}/${u}.cer" ]] && cat "${d}/${u}.cer" >> "${REVOKED_PEM}" && rm -rf "${d}" && added=1
+    done
+    shopt -u nullglob
+    if [[ $added -eq 1 ]]; then
+        Rebuild_SUSPENDED_PEM
+        Rebuild_CRL
+    fi
+    echo -e "${Info} 已删除 ${u}（吊销记录已写入CRL）。"
+}
+
+# 证书侧：临时禁用/恢复（可复用同一证书）
+Suspend_Cert_User(){
+    local u="${1:-}"
+    if [[ -z "$u" ]]; then
+      echo "临时禁用哪个证书用户？"
+      read -e -p "(默认取消): " u
+    fi
+    [[ -z "$u" ]] && echo "已取消..." && return 1
+    sanitize_username "$u" || { echo -e "${Error} 用户名不合法"; return 1; }
+    user_dir="${USERS_DIR}/${u}"
+    [[ ! -f "${user_dir}/${u}.cer" ]] && echo -e "${Error} 未找到证书：${user_dir}/${u}.cer" && return 1
+    Ensure_CRL
+    ts=$(date +%Y%m%d-%H%M%S)
+    mkdir -p "${DISABLED_DIR}"
+    mv "${user_dir}" "${DISABLED_DIR}/${u}-susp-${ts}"
+    Rebuild_SUSPENDED_PEM
+    Rebuild_CRL
+    echo -e "${Info} 已临时禁用 ${u}。"
+}
+Unsuspend_Cert_User(){
+    local u="${1:-}"
+    if [[ -z "$u" ]]; then
+      echo "恢复哪个证书用户？（恢复后同一证书可继续使用）"
+      read -e -p "(默认取消): " u
+    fi
+    [[ -z "$u" ]] && echo "已取消..." && return 1
+    sanitize_username "$u" || { echo -e "${Error} 用户名不合法"; return 1; }
+    last_dir=$(ls -1dt "${DISABLED_DIR}/${u}-susp-"* 2>/dev/null | head -n1 || true)
+    [[ -z "${last_dir}" ]] && echo -e "${Error} 未找到 ${u} 的临时禁用归档" && return 1
+    mv "${last_dir}" "${USERS_DIR}/${u}"
+    Rebuild_SUSPENDED_PEM
+    Rebuild_CRL
+    echo -e "${Info} 已恢复 ${u}。"
+}
+
 Del_User(){
 	List_User
-	[[ ${User_num} == 1 ]] && echo -e "${Error} 当前仅剩一个账号配置，无法删除 !" && exit 1
-	echo -e "请输入要删除的VPN账号的用户名"
+	echo "请输入要删除的VPN账号的用户名"
 	read -e -p "(默认取消):" Del_username
-	[[ -z "${Del_username}" ]] && echo "已取消..." && exit 1
-	user_status=$(cat "${passwd_file}"|grep "${Del_username}"':*:')
-	[[ -z ${user_status} ]] && echo -e "${Error} 用户名不存在 ! [${Del_username}]" && exit 1
-	ocpasswd -c ${passwd_file} -d ${Del_username}
-	user_status=$(cat "${passwd_file}"|grep "${Del_username}"':*:')
-	if [[ -z ${user_status} ]]; then
-		echo -e "${Info} 删除成功 ! [${Del_username}]"
-	else
-		echo -e "${Error} 删除失败 ! [${Del_username}]" && exit 1
-	fi
+	[[ -z "${Del_username}" ]] && echo "已取消..." && return 1
+
+	sanitize_username "${Del_username}" || { echo -e "${Error} 用户名不合法"; return 1; }
+
+	# 证书侧（吊销+删除，含 suspended 归档）
+	Delete_Cert_User "${Del_username}"
+
+	# 密码侧
+	pw_delete "${Del_username}"
+	echo -e "${Info} 已删除用户 '${Del_username}'（证书已吊销/清理；密码账户已删除）。"
 }
+
 Modify_User_disabled(){
 	List_User
-	echo -e "请输入要启用/禁用的VPN账号的用户名"
+	echo -e "请输入要 启用/禁用 的VPN账号用户名（证书 + 密码 联动）"
 	read -e -p "(默认取消):" Modify_username
-	[[ -z "${Modify_username}" ]] && echo "已取消..." && exit 1
-	user_status=$(cat "${passwd_file}"|grep "${Modify_username}"':*:')
-	[[ -z ${user_status} ]] && echo -e "${Error} 用户名不存在 ! [${Modify_username}]" && exit 1
-	user_status=$(cat "${passwd_file}" | grep "${Modify_username}"':*:' | awk -F ':*:' '{print $NF}' |cut -c 1)
-	if [[ ${user_status} == '!' ]]; then
-			ocpasswd -c ${passwd_file} -u ${Modify_username}
-			user_status=$(cat "${passwd_file}" | grep "${Modify_username}"':*:' | awk -F ':*:' '{print $NF}' |cut -c 1)
-			if [[ ${user_status} != '!' ]]; then
-				echo -e "${Info} 启用成功 ! [${Modify_username}]"
-			else
-				echo -e "${Error} 启用失败 ! [${Modify_username}]" && exit 1
-			fi
-		else
-			ocpasswd -c ${passwd_file} -l ${Modify_username}
-			user_status=$(cat "${passwd_file}" | grep "${Modify_username}"':*:' | awk -F ':*:' '{print $NF}' |cut -c 1)
-			if [[ ${user_status} == '!' ]]; then
-				echo -e "${Info} 禁用成功 ! [${Modify_username}]"
-			else
-				echo -e "${Error} 禁用失败 ! [${Modify_username}]" && exit 1
-			fi
-		fi
+	[[ -z "${Modify_username}" ]] && echo "已取消..." && return 1
+
+	sanitize_username "${Modify_username}" || { echo -e "${Error} 用户名不合法"; return 1; }
+
+	# 如果证书启用 -> 临时禁用证书 + 禁用密码
+	if [[ -f "${USERS_DIR}/${Modify_username}/${Modify_username}.cer" ]]; then
+		echo -e "${Info} 正在临时禁用证书并禁用密码：'${Modify_username}' ..."
+		Suspend_Cert_User "${Modify_username}"
+		pw_lock "${Modify_username}"
+		echo -e "${Info} '${Modify_username}' 已禁用（证书：禁用，密码：禁用）。"
+		return 0
+	fi
+
+	# 如果证书处于临时禁用 -> 恢复证书 + 启用密码
+	last_dir=$(ls -1dt "${DISABLED_DIR}/${Modify_username}-susp-"* 2>/dev/null | head -n1 || true)
+	if [[ -n "${last_dir}" ]]; then
+		echo -e "${Info} 正在恢复证书并启用密码：'${Modify_username}' ..."
+		Unsuspend_Cert_User "${Modify_username}"
+		pw_unlock "${Modify_username}"
+		echo -e "${Info} '${Modify_username}' 已启用（证书：启用，密码：启用）。"
+		return 0
+	fi
+
+	echo -e "${Tip} 未找到该用户证书，请先添加用户。"
 }
+
 Set_Pass(){
 	check_installed_status
 	echo && echo -e " 你要做什么？
@@ -392,6 +625,7 @@ Set_Pass(){
 		echo -e "${Error} 请输入正确的数字[1-3]" && exit 1
 	fi
 }
+
 View_Config(){
 	Get_ip
 	Read_config
@@ -497,6 +731,7 @@ Set_iptables(){
 	echo -e '#!/bin/bash\n/sbin/iptables-restore < /etc/iptables.up.rules' > /etc/network/if-pre-up.d/iptables
 	chmod +x /etc/network/if-pre-up.d/iptables
 }
+
 Update_Shell(){
 	sh_new_ver=$(wget --no-check-certificate -qO- -t1 -T3 "https://raw.githubusercontent.com/ToyoDAdoubiBackup/doubi/master/ocserv.sh"|grep 'sh_ver="'|awk -F "=" '{print $NF}'|sed 's/\"//g'|head -1) && sh_new_type="github"
 	[[ -z ${sh_new_ver} ]] && echo -e "${Error} 无法链接到 Github !" && exit 0
@@ -507,6 +742,7 @@ Update_Shell(){
 	wget -N --no-check-certificate "https://raw.githubusercontent.com/ToyoDAdoubiBackup/doubi/master/ocserv.sh" && chmod +x ocserv.sh
 	echo -e "脚本已更新为最新版本[ ${sh_new_ver} ] !(注意：因为更新方式为直接覆盖当前运行的脚本，所以可能下面会提示一些报错，无视即可)" && exit 0
 }
+
 check_sys
 [[ ${release} != "debian" ]] && [[ ${release} != "ubuntu" ]] && echo -e "${Error} 本脚本不支持当前系统 ${release} !" && exit 1
 echo && echo -e " ocserv 一键安装管理脚本 ${Red_font_prefix}[v${sh_ver}]${Font_color_suffix}
