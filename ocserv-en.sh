@@ -47,7 +47,6 @@ check_sys(){
     elif cat /proc/version | grep -q -E -i "centos|red hat|redhat"; then
         release="centos"
     fi
-    release="ubuntu"
     #bit=`uname -m`
 }
 
@@ -77,26 +76,29 @@ Get_ip(){
     fi
 }
 Download_ocserv(){
-    mkdir "ocserv" && cd "ocserv"
-    wget "ftp://ftp.infradead.org/pub/ocserv/ocserv-${ocserv_ver}.tar.xz"
-    [[ ! -s "ocserv-${ocserv_ver}.tar.xz" ]] && echo -e "${Error} ocserv source download failed!" && rm -rf "ocserv/" && rm -rf "ocserv-${ocserv_ver}.tar.xz" && exit 1
-    tar -xJf ocserv-${ocserv_ver}.tar.xz && cd ocserv-${ocserv_ver}
+    build_dir="/tmp/ocserv-build"
+    rm -rf "${build_dir}"
+    mkdir -p "${build_dir}"
+    wget -O "${build_dir}/ocserv-${ocserv_ver}.tar.xz" "https://ftp.infradead.org/pub/ocserv/ocserv-${ocserv_ver}.tar.xz"
+    [[ ! -s "${build_dir}/ocserv-${ocserv_ver}.tar.xz" ]] && echo -e "${Error} ocserv source download failed!" && rm -rf "${build_dir}" && exit 1
+    tar -xJf "${build_dir}/ocserv-${ocserv_ver}.tar.xz" -C "${build_dir}"
+    cd "${build_dir}/ocserv-${ocserv_ver}"
     ./configure
     make
     make install
-    cd .. && cd ..
-    rm -rf ocserv/
+    cd /
+    rm -rf "${build_dir}"
     
     if [[ -e ${file} ]]; then
-        mkdir "${conf_file}"
-        wget --no-check-certificate -N -P "${conf_file}" "https://raw.githubusercontent.com/sfc9982/AnyConnect-Server/main/ocserv.conf"
+        mkdir -p "${conf_file}"
+        wget -N -P "${conf_file}" "https://raw.githubusercontent.com/sfc9982/AnyConnect-Server/main/ocserv.conf"
         [[ ! -s "${conf}" ]] && echo -e "${Error} ocserv config download failed!" && rm -rf "${conf_file}" && exit 1
     else
         echo -e "${Error} ocserv compiled failed!" && exit 1
     fi
 }
 Service_ocserv(){
-    if ! wget --no-check-certificate https://raw.githubusercontent.com/ToyoDAdoubiBackup/doubi/master/service/ocserv_debian -O /etc/init.d/ocserv; then
+    if ! wget https://raw.githubusercontent.com/ToyoDAdoubiBackup/doubi/master/service/ocserv_debian -O /etc/init.d/ocserv; then
         echo -e "${Error} ocserv service management script downloadf failed!" && over
     fi
     chmod +x /etc/init.d/ocserv
@@ -149,6 +151,7 @@ tls_www_server' > server.tmpl
     mv ca-key.pem /etc/ocserv/ssl/ca-key.pem
     mv server-cert.pem /etc/ocserv/ssl/server-cert.pem
     mv server-key.pem /etc/ocserv/ssl/server-key.pem
+    chmod 600 /etc/ocserv/ssl/ca-key.pem /etc/ocserv/ssl/server-key.pem
     cd .. && rm -rf /tmp/ssl/
 }
 Installation_dependency(){
@@ -159,19 +162,19 @@ Installation_dependency(){
         cat /etc/issue |grep 9\..*>/dev/null
         if [[ $? = 0 ]]; then
             apt-get update
-            apt-get install vim net-tools pkg-config build-essential libgnutls28-dev libwrap0-dev liblz4-dev libseccomp-dev libreadline-dev libnl-nf-3-dev libev-dev gnutls-bin ipcalc ipcalc-ng -y
+            apt-get install vim net-tools pkg-config build-essential ca-certificates iproute2 libgnutls28-dev libwrap0-dev liblz4-dev libseccomp-dev libreadline-dev libnl-nf-3-dev libev-dev gnutls-bin ipcalc -y
         else
             mv /etc/apt/sources.list /etc/apt/sources.list.bak
-            wget --no-check-certificate -O "/etc/apt/sources.list" "https://raw.githubusercontent.com/ToyoDAdoubiBackup/doubi/master/sources/us.sources.list"
+            wget -O "/etc/apt/sources.list" "https://raw.githubusercontent.com/ToyoDAdoubiBackup/doubi/master/sources/us.sources.list"
             apt-get update
-            apt-get install vim net-tools pkg-config build-essential libgnutls28-dev libwrap0-dev liblz4-dev libseccomp-dev libreadline-dev libnl-nf-3-dev libev-dev gnutls-bin ipcalc ipcalc-ng -y
+            apt-get install vim net-tools pkg-config build-essential ca-certificates iproute2 libgnutls28-dev libwrap0-dev liblz4-dev libseccomp-dev libreadline-dev libnl-nf-3-dev libev-dev gnutls-bin ipcalc -y
             rm -rf /etc/apt/sources.list
             mv /etc/apt/sources.list.bak /etc/apt/sources.list
             apt-get update
         fi
     else
         apt-get update
-        apt-get install vim net-tools pkg-config build-essential libgnutls28-dev libwrap0-dev liblz4-dev libseccomp-dev libreadline-dev libnl-nf-3-dev libev-dev gnutls-bin ipcalc ipcalc-ng -y
+        apt-get install vim net-tools pkg-config build-essential ca-certificates iproute2 libgnutls28-dev libwrap0-dev liblz4-dev libseccomp-dev libreadline-dev libnl-nf-3-dev libev-dev gnutls-bin ipcalc -y
     fi
 }
 Install_ocserv(){
@@ -194,7 +197,7 @@ Install_ocserv(){
     echo -e "${Info} Start to set iptables firewall ..."
     Set_iptables
     echo -e "${Info} Start to add iptables firewall rules..."
-    Add_iptables
+    Add_iptables "${set_tcp_port}" "${set_udp_port}"
     echo -e "${Info} Start to save iptables firewall rules..."
     Save_iptables
     echo -e "${Info} All progress installed completed, now starting..."
@@ -231,8 +234,8 @@ Set_ocserv(){
     vim ${conf}
     set_tcp_port=$(cat ${conf}|grep "tcp-port ="|awk -F ' = ' '{print $NF}')
     set_udp_port=$(cat ${conf}|grep "udp-port ="|awk -F ' = ' '{print $NF}')
-    Del_iptables
-    Add_iptables
+    Del_iptables "${tcp_port}" "${udp_port}"
+    Add_iptables "${set_tcp_port}" "${set_udp_port}"
     Save_iptables
     echo "Restart ocserv ? (Y/n)"
     read -e -p "(Default: Y):" yn
@@ -279,12 +282,23 @@ Set_udp_port(){
     fi
     done
 }
+Set_Conf_Value(){
+    # Safely rewrite a single key in ocserv.conf: replace in place if present, append otherwise.
+    # Values are passed via awk -v, avoiding sed expression string-concatenation entirely.
+    local key="$1" val="$2" tmp="${conf}.tmp"
+    awk -v key="${key}" -v val="${val}" '
+        BEGIN { found = 0 }
+        $0 ~ "^" key " = " { print key " = " val; found = 1; next }
+        { print }
+        END { if (!found) print key " = " val }
+    ' "${conf}" > "${tmp}" && cat "${tmp}" > "${conf}" && rm -f "${tmp}"
+}
 Set_Config(){
-    Add_User
+    Add_User || return 1
     Set_tcp_port
     Set_udp_port
-    sed -i 's/tcp-port = '"$(echo ${tcp_port})"'/tcp-port = '"$(echo ${set_tcp_port})"'/g' ${conf}
-    sed -i 's/udp-port = '"$(echo ${udp_port})"'/udp-port = '"$(echo ${set_udp_port})"'/g' ${conf}
+    Set_Conf_Value "tcp-port" "${set_tcp_port}"
+    Set_Conf_Value "udp-port" "${set_udp_port}"
 }
 Read_config(){
     [[ ! -e ${conf} ]] && echo -e "${Error} ocserv config file doesn't exist !" && exit 1
@@ -297,7 +311,7 @@ Read_config(){
 List_User(){
     declare -A seen
     if [[ -f "${passwd_file}" ]]; then
-        while IFS='' read -r line; do
+        while IFS='' read -r line || [[ -n "$line" ]]; do
             u=$(echo "$line" | awk -F':*:' '{print $1}')
             [[ -n "$u" ]] && seen["$u"]=1
         done < "${passwd_file}"
@@ -326,20 +340,23 @@ Add_User(){
     read -rp "Please input the username of VPN account
 (Default: admin): " username
     [[ -z "${username}" ]] && username="admin"
-	sanitize_username "${username}" || { echo -e "${Error} Invalid username"; return 1; }
+    sanitize_username "${username}" || { echo -e "${Error} Invalid username"; return 1; }
     echo && echo -e "   Username : ${username}" && echo
-    read -rsp "Please input the password of VPN account
-(默认: doub.io): " userpass
-    echo
-    [[ -z "${userpass}" ]] && userpass="doub.io"
+    # No default password anymore: force interactive input to avoid weak default accounts
+    userpass=""
+    while [[ -z "${userpass}" ]]; do
+        read -rsp "Please input the password of VPN account (required, cannot be empty): " userpass
+        echo
+    done
 
     mkdir -p "$(dirname "${passwd_file}")"
-    printf "%s\n%s\n" "${userpass}" "${userpass}" | ocpasswd -c "${passwd_file}" "${username}"
+    printf "%s\n%s\n" "${userpass}" "${userpass}" | ocpasswd -c "${passwd_file}" "${username}" || { echo -e "${Error} Failed to create password account!"; return 1; }
+    chmod 600 "${passwd_file}"
 
     Ensure_CRL
     user_dir="${USERS_DIR}/${username}"
     mkdir -p "${user_dir}"; chmod 700 "${user_dir}"
-    certtool --generate-privkey --outfile "${user_dir}/${username}-key.pem"
+    certtool --generate-privkey --outfile "${user_dir}/${username}-key.pem" || { echo -e "${Error} Failed to generate user private key!"; return 1; }
     cat > "${user_dir}/${username}.tmpl" <<EOF
 cn = "${username}"
 tls_www_client
@@ -352,7 +369,7 @@ EOF
       --load-ca-certificate "${CA_CERT}" \
       --load-ca-privkey "${CA_KEY}" \
       --template "${user_dir}/${username}.tmpl" \
-      --outfile "${user_dir}/${username}.cer"
+      --outfile "${user_dir}/${username}.cer" || { echo -e "${Error} Failed to generate user certificate!"; return 1; }
 
     openssl pkcs12 -export \
       -inkey "${user_dir}/${username}-key.pem" \
@@ -360,11 +377,11 @@ EOF
       -certfile "${CA_CERT}" \
       -name "AnyConnect VPN – ${username}" \
       -out "${user_dir}/${username}.p12" \
-      -passout pass:"${userpass}"
+      -passout pass:"${userpass}" || { echo -e "${Error} Failed to export p12 bundle!"; return 1; }
 
     chmod 600 "${user_dir}/${username}-key.pem" "${user_dir}/${username}.p12"
     echo -e "${Info} Created user '${username}' with certificate and password."
-    echo "  ${user_dir}/${username}.p12   (import to device; password: ${userpass})"
+    echo "  ${user_dir}/${username}.p12   (import to device; password is the one you just entered)"
     echo "  ${CA_CERT} (install/trust if prompted)"
 }
 Del_User(){
@@ -479,19 +496,15 @@ Uninstall_ocserv(){
         check_pid
         [[ ! -z $PID ]] && kill -9 ${PID} && rm -f ${PID_FILE}
         Read_config
-        Del_iptables
+        Del_iptables "${tcp_port}" "${udp_port}"
         Save_iptables
         update-rc.d -f ocserv remove
         rm -rf /etc/init.d/ocserv
         rm -rf "${conf_file}"
-        rm -rf "${log_file}"
-        cd '/usr/local/bin' && rm -f occtl
-        rm -f ocpasswd
-        cd '/usr/local/bin' && rm -f ocserv-fw
-        cd '/usr/local/sbin' && rm -f ocserv
-        cd '/usr/local/share/man/man8' && rm -f ocserv.8
-        rm -f ocpasswd.8
-        rm -f occtl.8
+        rm -f "${log_file}"
+        rm -f /usr/local/bin/occtl /usr/local/bin/ocpasswd /usr/local/bin/ocserv-fw
+        rm -f /usr/local/sbin/ocserv
+        rm -f /usr/local/share/man/man8/ocserv.8 /usr/local/share/man/man8/ocpasswd.8 /usr/local/share/man/man8/occtl.8
         echo && echo "ocserv uninstall completed !" && echo
     else
         echo && echo "uninstall canceled..." && echo
@@ -501,56 +514,44 @@ over(){
     update-rc.d -f ocserv remove
     rm -rf /etc/init.d/ocserv
     rm -rf "${conf_file}"
-    rm -rf "${log_file}"
-    cd '/usr/local/bin' && rm -f occtl
-    rm -f ocpasswd
-    cd '/usr/local/bin' && rm -f ocserv-fw
-    cd '/usr/local/sbin' && rm -f ocserv
-    cd '/usr/local/share/man/man8' && rm -f ocserv.8
-    rm -f ocpasswd.8
-    rm -f occtl.8
+    rm -f "${log_file}"
+    rm -f /usr/local/bin/occtl /usr/local/bin/ocpasswd /usr/local/bin/ocserv-fw
+    rm -f /usr/local/sbin/ocserv
+    rm -f /usr/local/share/man/man8/ocserv.8 /usr/local/share/man/man8/ocpasswd.8 /usr/local/share/man/man8/occtl.8
     echo && echo "install failed，ocserv uninstalled !" && echo
 }
 Add_iptables(){
-    iptables -I INPUT -m state --state NEW -m tcp -p tcp --dport ${set_tcp_port} -j ACCEPT
-    iptables -I INPUT -m state --state NEW -m udp -p udp --dport ${set_udp_port} -j ACCEPT
+    # Ports passed as arguments; existence check before insert to avoid duplicate rules
+    local tcp_port="${1:-${set_tcp_port}}"
+    local udp_port="${2:-${set_udp_port}}"
+    iptables -C INPUT -m state --state NEW -m tcp -p tcp --dport ${tcp_port} -j ACCEPT 2>/dev/null || \
+        iptables -I INPUT -m state --state NEW -m tcp -p tcp --dport ${tcp_port} -j ACCEPT
+    iptables -C INPUT -m state --state NEW -m udp -p udp --dport ${udp_port} -j ACCEPT 2>/dev/null || \
+        iptables -I INPUT -m state --state NEW -m udp -p udp --dport ${udp_port} -j ACCEPT
 }
 Del_iptables(){
-    iptables -D INPUT -m state --state NEW -m tcp -p tcp --dport ${tcp_port} -j ACCEPT
-    iptables -D INPUT -m state --state NEW -m udp -p udp --dport ${udp_port} -j ACCEPT
+    local tcp_port="${1:-${tcp_port}}"
+    local udp_port="${2:-${udp_port}}"
+    iptables -D INPUT -m state --state NEW -m tcp -p tcp --dport ${tcp_port} -j ACCEPT 2>/dev/null
+    iptables -D INPUT -m state --state NEW -m udp -p udp --dport ${udp_port} -j ACCEPT 2>/dev/null
+    return 0
 }
 Save_iptables(){
     iptables-save > /etc/iptables.up.rules
 }
 Set_iptables(){
-    echo -e "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+    grep -q '^net.ipv4.ip_forward' /etc/sysctl.conf || echo -e "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
     sysctl -p
-    ifconfig_status=$(ifconfig)
-    if [[ -z ${ifconfig_status} ]]; then
-        echo -e "${Error} ifconfig 未install !"
-        read -e -p "Please input your interface name manully(eth0 ens3 enpXsX venet0):" Network_card
+    # Prefer the default route to detect the egress NIC (eth0/ens3/enpXsX/venet0 all covered)
+    Network_card=$(ip -o -4 route show default 2>/dev/null | awk '{print $5; exit}')
+    if [[ -z "${Network_card}" ]]; then
+        echo -e "${Tip} Failed to detect NIC via default route, please input manually:"
+        ip -o addr 2>/dev/null || ifconfig
+        read -e -p "NIC name (e.g. eth0 / ens3 / enpXsX / venet0):" Network_card
         [[ -z "${Network_card}" ]] && echo "Canceled..." && exit 1
-    else
-        Network_card=$(ifconfig|grep "eth0")
-        if [[ ! -z ${Network_card} ]]; then
-            Network_card="eth0"
-        else
-            Network_card=$(ifconfig|grep "ens3")
-            if [[ ! -z ${Network_card} ]]; then
-                Network_card="ens3"
-            else
-                Network_card=$(ifconfig|grep "venet0")
-                if [[ ! -z ${Network_card} ]]; then
-                    Network_card="venet0"
-                else
-                    ifconfig
-                    read -e -p "Current network interface is not eth0 \ ens3(Debian9) \ venet0(OpenVZ) \ enpXsX(CentOS Ubuntu Latest), please manully input your NIC name:" Network_card
-                    [[ -z "${Network_card}" ]] && echo "Canceled..." && exit 1
-                fi
-            fi
-        fi
     fi
-    iptables -t nat -A POSTROUTING -o ${Network_card} -j MASQUERADE
+    iptables -t nat -C POSTROUTING -o ${Network_card} -j MASQUERADE 2>/dev/null || \
+        iptables -t nat -A POSTROUTING -o ${Network_card} -j MASQUERADE
     
     iptables-save > /etc/iptables.up.rules
     echo -e '#!/bin/bash\n/sbin/iptables-restore < /etc/iptables.up.rules' > /etc/network/if-pre-up.d/iptables
@@ -610,24 +611,17 @@ Rebuild_CRL(){
 # Configure auth to certificate default + plain fallback (OR)
 Configure_Auth(){
     [[ ! -e ${conf} ]] && echo -e "${Error} ocserv config file doesn't exist !" && exit 1
-    # ensure CA + CRL paths
-    if grep -qE '^\s*ca-cert\s*=' "${conf}"; then
-        sed -i "s|^\s*ca-cert\s*=.*|ca-cert = ${CA_CERT}|" "${conf}"
-    else
-        sed -i "1ica-cert = ${CA_CERT}" "${conf}"
-    fi
-    if grep -qE '^\s*crl\s*=' "${conf}"; then
-        sed -i "s|^\s*crl\s*=.*|crl = ${CRL_PEM}|" "${conf}"
-    else
-        sed -i "1icrl = ${CRL_PEM}" "${conf}"
-    fi
-    # username mapping from CN
-    grep -qE '^\s*cert-user-oid\s*=' "${conf}" || sed -i "1icert-user-oid = 2.5.4.3" "${conf}"
-    # configure auth (remove existing auth/enable-auth to avoid duplicates)
-    sed -i '/^\s*auth\s*= /d' "${conf}"
-    sed -i '/^\s*enable-auth\s*= /d' "${conf}"
-    sed -i '1iauth = "certificate"' "${conf}"
-    sed -i '1ienable-auth = "plain[passwd=/etc/ocserv/ocpasswd]"' "${conf}"
+    # Delete every script-managed entry first, then append once (config is order-independent)
+    sed -i '/^\s*ca-cert\s*=/d; /^\s*crl\s*=/d; /^\s*cert-user-oid\s*=/d; /^\s*auth\s*=/d; /^\s*enable-auth\s*=/' "${conf}"
+    cat >> "${conf}" <<EOF
+
+# === Managed by AnyConnect-Server: certificate default + password fallback ===
+ca-cert = ${CA_CERT}
+crl = ${CRL_PEM}
+cert-user-oid = 2.5.4.3
+auth = "certificate"
+enable-auth = "plain[passwd=${passwd_file}]"
+EOF
     echo -e "${Info} Enabled certificate default + password fallback in ${conf}"
 }
 # Certificate user management
@@ -691,21 +685,24 @@ Unsuspend_Cert_User(){
     echo -e "${Info} Unsuspended ${u}."
 }
 Update_Shell(){
-    sh_new_ver=$(wget --no-check-certificate -qO- -t1 -T3 "https://raw.githubusercontent.com/ToyoDAdoubiBackup/doubi/master/ocserv.sh"|grep 'sh_ver="'|awk -F "=" '{print $NF}'|sed 's/\"//g'|head -1) && sh_new_type="github"
+    # Self-update only from this repo's same-named script; never overwrite with the upstream version
+    local self_name; self_name="$(basename "$0")"
+    sh_new_ver=$(wget -qO- -t1 -T5 "https://raw.githubusercontent.com/sfc9982/AnyConnect-Server/main/${self_name}"|grep 'sh_ver="'|awk -F "=" '{print $NF}'|sed 's/\"//g'|head -1)
     [[ -z ${sh_new_ver} ]] && echo -e "${Error} Unable to connect to Github !" && exit 0
-    if [[ -e "/etc/init.d/ocserv" ]]; then
-        rm -rf /etc/init.d/ocserv
-        Service_ocserv
+    if [[ "${sh_new_ver}" == "${sh_ver}" ]]; then
+        echo -e "${Info} Already the latest version [ ${sh_ver} ] !" && exit 0
     fi
-    wget -N --no-check-certificate "https://raw.githubusercontent.com/ToyoDAdoubiBackup/doubi/master/ocserv.sh" && chmod +x ocserv.sh
-    echo -e "already latest[ ${sh_new_ver} ] !(WARN：may come out some warnings, just ignore them)" && exit 0
+    wget -O "${self_name}.new" "https://raw.githubusercontent.com/sfc9982/AnyConnect-Server/main/${self_name}" && chmod +x "${self_name}.new"
+    bash -n "${self_name}.new" || { echo -e "${Error} Downloaded version failed syntax check, update aborted !"; rm -f "${self_name}.new"; exit 1; }
+    mv -f "${self_name}.new" "${self_name}"
+    echo -e "${Info} Script updated to latest [ ${sh_new_ver} ], please re-run it !" && exit 0
 }
 check_sys
 [[ ${release} != "debian" ]] && [[ ${release} != "ubuntu" ]] && echo -e "${Error} OS is not supported ${release} !" && exit 1
 echo && echo -e " ocserv 1key install and conf script ${Red_font_prefix}[v${sh_ver}]${Font_color_suffix}
   -- Toyo | doub.io/vpnzy-7 --
   
- ${Green_font_prefix}0.${Font_color_suffix} Upgrade Script (DO NOT UPDATE)
+ ${Green_font_prefix}0.${Font_color_suffix} Upgrade Script
 ————————————
  ${Green_font_prefix}1.${Font_color_suffix} install ocserv
  ${Green_font_prefix}2.${Font_color_suffix} uninstall ocserv

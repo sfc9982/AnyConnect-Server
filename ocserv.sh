@@ -73,26 +73,29 @@ Get_ip(){
 	fi
 }
 Download_ocserv(){
-	mkdir "ocserv" && cd "ocserv"
-	wget "ftp://ftp.infradead.org/pub/ocserv/ocserv-${ocserv_ver}.tar.xz"
-	[[ ! -s "ocserv-${ocserv_ver}.tar.xz" ]] && echo -e "${Error} ocserv 源码文件下载失败 !" && rm -rf "ocserv/" && rm -rf "ocserv-${ocserv_ver}.tar.xz" && exit 1
-	tar -xJf ocserv-${ocserv_ver}.tar.xz && cd ocserv-${ocserv_ver}
+	build_dir="/tmp/ocserv-build"
+	rm -rf "${build_dir}"
+	mkdir -p "${build_dir}"
+	wget -O "${build_dir}/ocserv-${ocserv_ver}.tar.xz" "https://ftp.infradead.org/pub/ocserv/ocserv-${ocserv_ver}.tar.xz"
+	[[ ! -s "${build_dir}/ocserv-${ocserv_ver}.tar.xz" ]] && echo -e "${Error} ocserv 源码文件下载失败 !" && rm -rf "${build_dir}" && exit 1
+	tar -xJf "${build_dir}/ocserv-${ocserv_ver}.tar.xz" -C "${build_dir}"
+	cd "${build_dir}/ocserv-${ocserv_ver}"
 	./configure
 	make
 	make install
-	cd .. && cd ..
-	rm -rf ocserv/
+	cd /
+	rm -rf "${build_dir}"
 	
 	if [[ -e ${file} ]]; then
-		mkdir "${conf_file}"
-		wget --no-check-certificate -N -P "${conf_file}" "https://raw.githubusercontent.com/sfc9982/AnyConnect-Server/main/ocserv.conf"
+		mkdir -p "${conf_file}"
+		wget -N -P "${conf_file}" "https://raw.githubusercontent.com/sfc9982/AnyConnect-Server/main/ocserv.conf"
 		[[ ! -s "${conf}" ]] && echo -e "${Error} ocserv 配置文件下载失败 !" && rm -rf "${conf_file}" && exit 1
 	else
 		echo -e "${Error} ocserv 编译安装失败，请检查！" && exit 1
 	fi
 }
 Service_ocserv(){
-	if ! wget --no-check-certificate https://raw.githubusercontent.com/ToyoDAdoubiBackup/doubi/master/service/ocserv_debian -O /etc/init.d/ocserv; then
+	if ! wget https://raw.githubusercontent.com/ToyoDAdoubiBackup/doubi/master/service/ocserv_debian -O /etc/init.d/ocserv; then
 		echo -e "${Error} ocserv 服务 管理脚本下载失败 !" && over
 	fi
 	chmod +x /etc/init.d/ocserv
@@ -145,6 +148,7 @@ tls_www_server' > server.tmpl
 	mv ca-key.pem /etc/ocserv/ssl/ca-key.pem
 	mv server-cert.pem /etc/ocserv/ssl/server-cert.pem
 	mv server-key.pem /etc/ocserv/ssl/server-key.pem
+	chmod 600 /etc/ocserv/ssl/ca-key.pem /etc/ocserv/ssl/server-key.pem
 	cd .. && rm -rf /tmp/ssl/
 }
 Installation_dependency(){
@@ -155,19 +159,19 @@ Installation_dependency(){
 		cat /etc/issue |grep 9\..*>/dev/null
 		if [[ $? = 0 ]]; then
 			apt-get update
-			apt-get install vim net-tools pkg-config build-essential libgnutls28-dev libwrap0-dev liblz4-dev libseccomp-dev libreadline-dev libnl-nf-3-dev libev-dev gnutls-bin ipcalc ipcalc-ng -y
+			apt-get install vim net-tools pkg-config build-essential ca-certificates iproute2 libgnutls28-dev libwrap0-dev liblz4-dev libseccomp-dev libreadline-dev libnl-nf-3-dev libev-dev gnutls-bin ipcalc -y
 		else
 			mv /etc/apt/sources.list /etc/apt/sources.list.bak
-			wget --no-check-certificate -O "/etc/apt/sources.list" "https://raw.githubusercontent.com/ToyoDAdoubiBackup/doubi/master/sources/us.sources.list"
+			wget -O "/etc/apt/sources.list" "https://raw.githubusercontent.com/ToyoDAdoubiBackup/doubi/master/sources/us.sources.list"
 			apt-get update
-			apt-get install vim net-tools pkg-config build-essential libgnutls28-dev libwrap0-dev liblz4-dev libseccomp-dev libreadline-dev libnl-nf-3-dev libev-dev gnutls-bin ipcalc ipcalc-ng -y
+			apt-get install vim net-tools pkg-config build-essential ca-certificates iproute2 libgnutls28-dev libwrap0-dev liblz4-dev libseccomp-dev libreadline-dev libnl-nf-3-dev libev-dev gnutls-bin ipcalc -y
 			rm -rf /etc/apt/sources.list
 			mv /etc/apt/sources.list.bak /etc/apt/sources.list
 			apt-get update
 		fi
 	else
 		apt-get update
-		apt-get install vim net-tools pkg-config build-essential libgnutls28-dev libwrap0-dev liblz4-dev libseccomp-dev libreadline-dev libnl-nf-3-dev libev-dev gnutls-bin ipcalc ipcalc-ng -y
+		apt-get install vim net-tools pkg-config build-essential ca-certificates iproute2 libgnutls28-dev libwrap0-dev liblz4-dev libseccomp-dev libreadline-dev libnl-nf-3-dev libev-dev gnutls-bin ipcalc -y
 	fi
 }
 
@@ -222,24 +226,17 @@ Rebuild_CRL(){
 }
 Configure_Auth(){
     [[ ! -e ${conf} ]] && echo -e "${Error} ocserv 配置文件不存在 !" && exit 1
-    # 确保 CA/CRL 路径
-    if grep -qE '^\s*ca-cert\s*=' "${conf}"; then
-        sed -i "s|^\s*ca-cert\s*=.*|ca-cert = ${CA_CERT}|" "${conf}"
-    else
-        sed -i "1ica-cert = ${CA_CERT}" "${conf}"
-    fi
-    if grep -qE '^\s*crl\s*=' "${conf}"; then
-        sed -i "s|^\s*crl\s*=.*|crl = ${CRL_PEM}|" "${conf}"
-    else
-        sed -i "1icrl = ${CRL_PEM}" "${conf}"
-    fi
-    # 用户名从证书 CN 提取
-    grep -qE '^\s*cert-user-oid\s*=' "${conf}" || sed -i "1icert-user-oid = 2.5.4.3" "${conf}"
-    # 证书优先 + 密码备用（避免重复项）
-    sed -i '/^\s*auth\s*= /d' "${conf}"
-    sed -i '/^\s*enable-auth\s*= /d' "${conf}"
-    sed -i '1iauth = "certificate"' "${conf}"
-    sed -i '1ienable-auth = "plain[passwd=/etc/ocserv/ocpasswd]"' "${conf}"
+    # 先删除所有由脚本管理的条目，再统一追加（ocserv 配置与行序无关，取代原来的 sed 行首插入）
+    sed -i '/^\s*ca-cert\s*=/d; /^\s*crl\s*=/d; /^\s*cert-user-oid\s*=/d; /^\s*auth\s*=/d; /^\s*enable-auth\s*=/' "${conf}"
+    cat >> "${conf}" <<EOF
+
+# === 由 AnyConnect-Server 安装脚本管理：证书优先 + 密码备用 ===
+ca-cert = ${CA_CERT}
+crl = ${CRL_PEM}
+cert-user-oid = 2.5.4.3
+auth = "certificate"
+enable-auth = "plain[passwd=${passwd_file}]"
+EOF
     echo -e "${Info} 已启用 证书默认 + 密码备用 认证模式"
 }
 
@@ -264,7 +261,7 @@ Install_ocserv(){
 	echo -e "${Info} 开始设置 iptables防火墙..."
 	Set_iptables
 	echo -e "${Info} 开始添加 iptables防火墙规则..."
-	Add_iptables
+	Add_iptables "${set_tcp_port}" "${set_udp_port}"
 	echo -e "${Info} 开始保存 iptables防火墙规则..."
 	Save_iptables
 	echo -e "${Info} 所有步骤 安装完毕，开始启动..."
@@ -301,8 +298,8 @@ Set_ocserv(){
 	vim ${conf}
 	set_tcp_port=$(cat ${conf}|grep "tcp-port ="|awk -F ' = ' '{print $NF}')
 	set_udp_port=$(cat ${conf}|grep "udp-port ="|awk -F ' = ' '{print $NF}')
-	Del_iptables
-	Add_iptables
+	Del_iptables "${tcp_port}" "${udp_port}"
+	Add_iptables "${set_tcp_port}" "${set_udp_port}"
 	Save_iptables
 	echo "是否重启 ocserv ? (Y/n)"
 	read -e -p "(默认: Y):" yn
@@ -311,18 +308,7 @@ Set_ocserv(){
 		Restart_ocserv
 	fi
 }
-Set_username(){
-	echo "请输入 要添加的VPN账号 用户名"
-	read -e -p "(默认: admin):" username
-	[[ -z "${username}" ]] && username="admin"
-	echo && echo -e "	用户名 : ${Red_font_prefix}${username}${Font_color_suffix}" && echo
-}
-Set_passwd(){
-	echo "请输入 要添加的VPN账号 密码"
-	read -e -p "(默认: doub.io):" userpass
-	[[ -z "${userpass}" ]] && userpass="password"
-	echo && echo -e "	密码 : ${Red_font_prefix}${userpass}${Font_color_suffix}" && echo
-}
+# 账号交互已统一收敛到 Add_User()（证书 + 密码一次性创建），此处移除历史遗留的 Set_username/Set_passwd
 Set_tcp_port(){
 	while true
 	do
@@ -362,13 +348,24 @@ Set_udp_port(){
 	done
 }
 # 安装流程里，首次账号：用统一新增（证书+密码）
+Set_Conf_Value(){
+	# 安全改写 ocserv.conf 单个键值：存在则原位替换，不存在则追加。
+	# 通过 awk -v 传参，杜绝 sed 表达式字符串拼接（旧写法在值含特殊字符时会破坏配置）
+	local key="$1" val="$2" tmp="${conf}.tmp"
+	awk -v key="${key}" -v val="${val}" '
+		BEGIN { found = 0 }
+		$0 ~ "^" key " = " { print key " = " val; found = 1; next }
+		{ print }
+		END { if (!found) print key " = " val }
+	' "${conf}" > "${tmp}" && cat "${tmp}" > "${conf}" && rm -f "${tmp}"
+}
 Set_Config(){
 	# 兼容性保留：可直接调用新增用户（会创建证书+密码）
-	Add_User
+	Add_User || return 1
 	Set_tcp_port
 	Set_udp_port
-	sed -i 's/tcp-port = '"$(echo ${tcp_port})"'/tcp-port = '"$(echo ${set_tcp_port})"'/g' ${conf}
-	sed -i 's/udp-port = '"$(echo ${udp_port})"'/udp-port = '"$(echo ${set_udp_port})"'/g' ${conf}
+	Set_Conf_Value "tcp-port" "${set_tcp_port}"
+	Set_Conf_Value "udp-port" "${set_udp_port}"
 }
 Read_config(){
 	[[ ! -e ${conf} ]] && echo -e "${Error} ocserv 配置文件不存在 !" && exit 1
@@ -415,7 +412,7 @@ List_User(){
 	# 合并 ocpasswd + 证书目录 + disabled 归档 的用户集合
 	declare -A seen
 	if [[ -f "${passwd_file}" ]]; then
-		while IFS='' read -r line; do
+		while IFS='' read -r line || [[ -n "$line" ]]; do
 			u=$(echo "$line" | awk -F':*:' '{print $1}')
 			[[ -n "$u" ]] && seen["$u"]=1
 		done < "${passwd_file}"
@@ -448,20 +445,23 @@ Add_User(){
 	[[ -z "${username}" ]] && username="admin"
 	sanitize_username "${username}" || { echo -e "${Error} 用户名不合法"; return 1; }
 	echo && echo -e "   用户名 : ${username}" && echo
-	read -rsp "请输入 要添加的VPN账号 密码
-(默认: doub.io): " userpass
-	echo
-	[[ -z "${userpass}" ]] && userpass="doub.io"
+	# 移除默认口令，强制交互输入，避免 admin/doub.io 这类默认弱账户
+	userpass=""
+	while [[ -z "${userpass}" ]]; do
+		read -rsp "请输入 要添加的VPN账号 密码(不可为空): " userpass
+		echo
+	done
 
 	# 密码账户
 	mkdir -p "$(dirname "${passwd_file}")"
-	printf "%s\n%s\n" "${userpass}" "${userpass}" | ocpasswd -c "${passwd_file}" "${username}"
+	printf "%s\n%s\n" "${userpass}" "${userpass}" | ocpasswd -c "${passwd_file}" "${username}" || { echo -e "${Error} 密码账户创建失败 !"; return 1; }
+	chmod 600 "${passwd_file}"
 
 	# 证书账户
 	Ensure_CRL
 	user_dir="${USERS_DIR}/${username}"
 	mkdir -p "${user_dir}"; chmod 700 "${user_dir}"
-	certtool --generate-privkey --outfile "${user_dir}/${username}-key.pem"
+	certtool --generate-privkey --outfile "${user_dir}/${username}-key.pem" || { echo -e "${Error} 生成用户私钥失败 !"; return 1; }
 	cat > "${user_dir}/${username}.tmpl" <<EOF
 cn = "${username}"
 tls_www_client
@@ -474,7 +474,7 @@ EOF
 	  --load-ca-certificate "${CA_CERT}" \
 	  --load-ca-privkey "${CA_KEY}" \
 	  --template "${user_dir}/${username}.tmpl" \
-	  --outfile "${user_dir}/${username}.cer"
+	  --outfile "${user_dir}/${username}.cer" || { echo -e "${Error} 生成用户证书失败 !"; return 1; }
 
 	openssl pkcs12 -export \
 	  -inkey "${user_dir}/${username}-key.pem" \
@@ -482,11 +482,11 @@ EOF
 	  -certfile "${CA_CERT}" \
 	  -name "AnyConnect VPN – ${username}" \
 	  -out "${user_dir}/${username}.p12" \
-	  -passout pass:"${userpass}"
+	  -passout pass:"${userpass}" || { echo -e "${Error} 导出 p12 证书包失败 !"; return 1; }
 
 	chmod 600 "${user_dir}/${username}-key.pem" "${user_dir}/${username}.p12"
 	echo -e "${Info} 已创建用户 '${username}' 的 证书 + 密码。"
-	echo "  ${user_dir}/${username}.p12   (导入到设备；密码: ${userpass})"
+	echo "  ${user_dir}/${username}.p12   (导入到设备；密码为刚才输入的账号密码)"
 	echo "  ${CA_CERT} (若提示，请信任/安装根证书)"
 }
 
@@ -622,7 +622,7 @@ Set_Pass(){
 	elif [[ ${set_num} == "3" ]]; then
 		Modify_User_disabled
 	else
-		echo -e "${Error} 请输入正确的数字[1-3]" && exit 1
+		echo -e "${Error} 请输入正确的数字[0-3]" && exit 1
 	fi
 }
 
@@ -654,19 +654,15 @@ Uninstall_ocserv(){
 		check_pid
 		[[ ! -z $PID ]] && kill -9 ${PID} && rm -f ${PID_FILE}
 		Read_config
-		Del_iptables
+		Del_iptables "${tcp_port}" "${udp_port}"
 		Save_iptables
 		update-rc.d -f ocserv remove
 		rm -rf /etc/init.d/ocserv
 		rm -rf "${conf_file}"
-		rm -rf "${log_file}"
-		cd '/usr/local/bin' && rm -f occtl
-		rm -f ocpasswd
-		cd '/usr/local/bin' && rm -f ocserv-fw
-		cd '/usr/local/sbin' && rm -f ocserv
-		cd '/usr/local/share/man/man8' && rm -f ocserv.8
-		rm -f ocpasswd.8
-		rm -f occtl.8
+		rm -f "${log_file}"
+		rm -f /usr/local/bin/occtl /usr/local/bin/ocpasswd /usr/local/bin/ocserv-fw
+		rm -f /usr/local/sbin/ocserv
+		rm -f /usr/local/share/man/man8/ocserv.8 /usr/local/share/man/man8/ocpasswd.8 /usr/local/share/man/man8/occtl.8
 		echo && echo "ocserv 卸载完成 !" && echo
 	else
 		echo && echo "卸载已取消..." && echo
@@ -676,56 +672,44 @@ over(){
 	update-rc.d -f ocserv remove
 	rm -rf /etc/init.d/ocserv
 	rm -rf "${conf_file}"
-	rm -rf "${log_file}"
-	cd '/usr/local/bin' && rm -f occtl
-	rm -f ocpasswd
-	cd '/usr/local/bin' && rm -f ocserv-fw
-	cd '/usr/local/sbin' && rm -f ocserv
-	cd '/usr/local/share/man/man8' && rm -f ocserv.8
-	rm -f ocpasswd.8
-	rm -f occtl.8
+	rm -f "${log_file}"
+	rm -f /usr/local/bin/occtl /usr/local/bin/ocpasswd /usr/local/bin/ocserv-fw
+	rm -f /usr/local/sbin/ocserv
+	rm -f /usr/local/share/man/man8/ocserv.8 /usr/local/share/man/man8/ocpasswd.8 /usr/local/share/man/man8/occtl.8
 	echo && echo "安装过程错误，ocserv 卸载完成 !" && echo
 }
 Add_iptables(){
-	iptables -I INPUT -m state --state NEW -m tcp -p tcp --dport ${set_tcp_port} -j ACCEPT
-	iptables -I INPUT -m state --state NEW -m udp -p udp --dport ${set_udp_port} -j ACCEPT
+	# 端口以参数传入，避免跨函数依赖全局变量；插入前做存在性检查，防止重复规则
+	local tcp_port="${1:-${set_tcp_port}}"
+	local udp_port="${2:-${set_udp_port}}"
+	iptables -C INPUT -m state --state NEW -m tcp -p tcp --dport ${tcp_port} -j ACCEPT 2>/dev/null || \
+		iptables -I INPUT -m state --state NEW -m tcp -p tcp --dport ${tcp_port} -j ACCEPT
+	iptables -C INPUT -m state --state NEW -m udp -p udp --dport ${udp_port} -j ACCEPT 2>/dev/null || \
+		iptables -I INPUT -m state --state NEW -m udp -p udp --dport ${udp_port} -j ACCEPT
 }
 Del_iptables(){
-	iptables -D INPUT -m state --state NEW -m tcp -p tcp --dport ${tcp_port} -j ACCEPT
-	iptables -D INPUT -m state --state NEW -m udp -p udp --dport ${udp_port} -j ACCEPT
+	local tcp_port="${1:-${tcp_port}}"
+	local udp_port="${2:-${udp_port}}"
+	iptables -D INPUT -m state --state NEW -m tcp -p tcp --dport ${tcp_port} -j ACCEPT 2>/dev/null
+	iptables -D INPUT -m state --state NEW -m udp -p udp --dport ${udp_port} -j ACCEPT 2>/dev/null
+	return 0
 }
 Save_iptables(){
 	iptables-save > /etc/iptables.up.rules
 }
 Set_iptables(){
-	echo -e "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+	grep -q '^net.ipv4.ip_forward' /etc/sysctl.conf || echo -e "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
 	sysctl -p
-	ifconfig_status=$(ifconfig)
-	if [[ -z ${ifconfig_status} ]]; then
-		echo -e "${Error} ifconfig 未安装 !"
-		read -e -p "请手动输入你的网卡名(一般情况下，网卡名为 eth0，Debian9 则为 ens3，CentOS Ubuntu 最新版本可能为 enpXsX(X代表数字或字母)，OpenVZ 虚拟化则为 venet0):" Network_card
+	# 优先按默认路由识别出口网卡，兼容 eth0/ens3/enpXsX/venet0 等新旧命名
+	Network_card=$(ip -o -4 route show default 2>/dev/null | awk '{print $5; exit}')
+	if [[ -z "${Network_card}" ]]; then
+		echo -e "${Tip} 未能通过默认路由识别网卡，请根据下面的输出手动输入网卡名："
+		ip -o addr 2>/dev/null || ifconfig
+		read -e -p "网卡名(如 eth0 / ens3 / enpXsX / venet0):" Network_card
 		[[ -z "${Network_card}" ]] && echo "取消..." && exit 1
-	else
-		Network_card=$(ifconfig|grep "eth0")
-		if [[ ! -z ${Network_card} ]]; then
-			Network_card="eth0"
-		else
-			Network_card=$(ifconfig|grep "ens3")
-			if [[ ! -z ${Network_card} ]]; then
-				Network_card="ens3"
-			else
-				Network_card=$(ifconfig|grep "venet0")
-				if [[ ! -z ${Network_card} ]]; then
-					Network_card="venet0"
-				else
-					ifconfig
-					read -e -p "检测到本服务器的网卡非 eth0 \ ens3(Debian9) \ venet0(OpenVZ) \ enpXsX(CentOS Ubuntu 最新版本，X代表数字或字母)，请根据上面输出的网卡信息手动输入你的网卡名:" Network_card
-					[[ -z "${Network_card}" ]] && echo "取消..." && exit 1
-				fi
-			fi
-		fi
 	fi
-	iptables -t nat -A POSTROUTING -o ${Network_card} -j MASQUERADE
+	iptables -t nat -C POSTROUTING -o ${Network_card} -j MASQUERADE 2>/dev/null || \
+		iptables -t nat -A POSTROUTING -o ${Network_card} -j MASQUERADE
 	
 	iptables-save > /etc/iptables.up.rules
 	echo -e '#!/bin/bash\n/sbin/iptables-restore < /etc/iptables.up.rules' > /etc/network/if-pre-up.d/iptables
@@ -733,14 +717,17 @@ Set_iptables(){
 }
 
 Update_Shell(){
-	sh_new_ver=$(wget --no-check-certificate -qO- -t1 -T3 "https://raw.githubusercontent.com/ToyoDAdoubiBackup/doubi/master/ocserv.sh"|grep 'sh_ver="'|awk -F "=" '{print $NF}'|sed 's/\"//g'|head -1) && sh_new_type="github"
+	# 自更新只从本项目仓库拉取同名脚本，避免误覆盖为上游版本而丢失证书/CRL 功能
+	local self_name; self_name="$(basename "$0")"
+	sh_new_ver=$(wget -qO- -t1 -T5 "https://raw.githubusercontent.com/sfc9982/AnyConnect-Server/main/${self_name}"|grep 'sh_ver="'|awk -F "=" '{print $NF}'|sed 's/\"//g'|head -1)
 	[[ -z ${sh_new_ver} ]] && echo -e "${Error} 无法链接到 Github !" && exit 0
-	if [[ -e "/etc/init.d/ocserv" ]]; then
-		rm -rf /etc/init.d/ocserv
-		Service_ocserv
+	if [[ "${sh_new_ver}" == "${sh_ver}" ]]; then
+		echo -e "${Info} 当前已是最新版本[ ${sh_ver} ] !" && exit 0
 	fi
-	wget -N --no-check-certificate "https://raw.githubusercontent.com/ToyoDAdoubiBackup/doubi/master/ocserv.sh" && chmod +x ocserv.sh
-	echo -e "脚本已更新为最新版本[ ${sh_new_ver} ] !(注意：因为更新方式为直接覆盖当前运行的脚本，所以可能下面会提示一些报错，无视即可)" && exit 0
+	wget -O "${self_name}.new" "https://raw.githubusercontent.com/sfc9982/AnyConnect-Server/main/${self_name}" && chmod +x "${self_name}.new"
+	bash -n "${self_name}.new" || { echo -e "${Error} 下载的新版本未通过语法检查，已放弃更新 !"; rm -f "${self_name}.new"; exit 1; }
+	mv -f "${self_name}.new" "${self_name}"
+	echo -e "${Info} 脚本已更新为最新版本[ ${sh_new_ver} ]，请重新运行 !" && exit 0
 }
 
 check_sys
@@ -809,4 +796,3 @@ case "$num" in
 	echo "请输入正确数字 [0-9]"
 	;;
 esac
-set 限制解除 
