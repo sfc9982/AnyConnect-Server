@@ -2,7 +2,7 @@
 PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:~/bin
 export PATH
 
-sh_ver="2.0.0"
+sh_ver="2.1.0"
 file="/usr/local/sbin/ocserv"
 conf_file="/etc/ocserv"
 conf="/etc/ocserv/ocserv.conf"
@@ -32,22 +32,37 @@ check_root(){
 
 # Check system
 check_sys(){
-    if [[ -f /etc/redhat-release ]]; then
-        release="centos"
-    elif cat /etc/issue | grep -q -E -i "debian"; then
-        release="debian"
-    elif cat /etc/issue | grep -q -E -i "ubuntu"; then
-        release="ubuntu"
-    elif cat /etc/issue | grep -q -E -i "centos|red hat|redhat"; then
-        release="centos"
-    elif cat /proc/version | grep -q -E -i "debian"; then
-        release="debian"
-    elif cat /proc/version | grep -q -E -i "ubuntu"; then
-        release="ubuntu"
-    elif cat /proc/version | grep -q -E -i "centos|red hat|redhat"; then
-        release="centos"
+    # Detect distro and package manager: /etc/os-release first, legacy fallback second.
+    # release: debian/ubuntu/rhel/rocky/almalinux/fedora/arch/opensuse...  pm: matching package manager
+    release=""
+    pm=""
+    if [[ -f /etc/os-release ]]; then
+        . /etc/os-release 2>/dev/null
+        release="${ID}"
+        case "${release}" in
+            debian|ubuntu|linuxmint|deepin|kali|raspbian)
+                pm="apt-get" ;;
+            rhel|centos|rocky|almalinux|anolis|openeuler|opencloudos|amzn)
+                pm="dnf"
+                command -v dnf >/dev/null 2>&1 || pm="yum" ;;
+            fedora|mageia)
+                pm="dnf" ;;
+            arch|manjaro|endeavouros|artix)
+                pm="pacman" ;;
+            opensuse*|sles|suse)
+                pm="zypper" ;;
+        esac
     fi
-    #bit=`uname -m`
+    if [[ -z "${pm}" ]]; then
+        if [[ -f /etc/redhat-release ]]; then
+            release="rhel"
+            pm="yum"; command -v dnf >/dev/null 2>&1 && pm="dnf"
+        elif grep -q -E -i "debian" /etc/issue 2>/dev/null; then
+            release="debian"; pm="apt-get"
+        elif grep -q -E -i "ubuntu" /etc/issue 2>/dev/null; then
+            release="ubuntu"; pm="apt-get"
+        fi
+    fi
 }
 
 check_installed_status(){
@@ -97,13 +112,59 @@ Download_ocserv(){
         echo -e "${Error} ocserv compiled failed!" && exit 1
     fi
 }
+# Whether systemd is available for service management (default on mainstream distros)
+have_systemd(){
+    command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]
+}
 Service_ocserv(){
-    if ! wget https://raw.githubusercontent.com/ToyoDAdoubiBackup/doubi/master/service/ocserv_debian -O /etc/init.d/ocserv; then
-        echo -e "${Error} ocserv service management script downloadf failed!" && over
+    # Inline systemd unit files replace the third-party init.d download (no external supply chain)
+    if have_systemd; then
+        cat > /etc/systemd/system/ocserv.service <<EOF
+[Unit]
+Description=OpenConnect SSL VPN server (Cisco AnyConnect compatible)
+Documentation=https://ocserv.gitlab.io/www/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+PIDFile=/var/run/ocserv.pid
+ExecStart=/usr/local/sbin/ocserv -c /etc/ocserv/ocserv.conf
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload
+        systemctl enable ocserv >/dev/null 2>&1
+        echo -e "${Info} ocserv systemd service unit installed and enabled at boot!"
+    else
+        # Minimal environments without systemd (Docker/OpenVZ): manage the daemon directly
+        echo -e "${Tip} systemd not detected, ocserv will be managed as a plain daemon (no boot autostart)."
     fi
-    chmod +x /etc/init.d/ocserv
-    update-rc.d -f ocserv defaults
-    echo -e "${Info} ocserv service management script download successfully."
+}
+Firewall_Service_ocserv(){
+    # Boot-time iptables restore unit (replaces the Debian-only if-pre-up.d hook; distro-agnostic)
+    have_systemd || return 0
+    cat > /etc/systemd/system/ocserv-firewall.service <<EOF
+[Unit]
+Description=Restore ocserv iptables firewall rules
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'iptables-restore < /etc/iptables.up.rules'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable ocserv-firewall >/dev/null 2>&1
 }
 rand(){
     min=10000
@@ -156,26 +217,32 @@ tls_www_server' > server.tmpl
 }
 Installation_dependency(){
     [[ ! -e "/dev/net/tun" ]] && echo -e "${Error} Your VPS haven't enabled TUN function, please contact your IDC, or use VPS control pannel to manully enable TUN/TAP !" && exit 1
-    if [[ ${release} = "centos" ]]; then
-        echo -e "${Error} CentOS is not offically supported, but you can edit my script !" && exit 1
-    elif [[ ${release} = "debian" ]]; then
-        cat /etc/issue |grep 9\..*>/dev/null
-        if [[ $? = 0 ]]; then
+    case "${pm}" in
+        apt-get)
+            export DEBIAN_FRONTEND=noninteractive
             apt-get update
-            apt-get install vim net-tools pkg-config build-essential ca-certificates iproute2 libgnutls28-dev libwrap0-dev liblz4-dev libseccomp-dev libreadline-dev libnl-nf-3-dev libev-dev gnutls-bin ipcalc -y
-        else
-            mv /etc/apt/sources.list /etc/apt/sources.list.bak
-            wget -O "/etc/apt/sources.list" "https://raw.githubusercontent.com/ToyoDAdoubiBackup/doubi/master/sources/us.sources.list"
-            apt-get update
-            apt-get install vim net-tools pkg-config build-essential ca-certificates iproute2 libgnutls28-dev libwrap0-dev liblz4-dev libseccomp-dev libreadline-dev libnl-nf-3-dev libev-dev gnutls-bin ipcalc -y
-            rm -rf /etc/apt/sources.list
-            mv /etc/apt/sources.list.bak /etc/apt/sources.list
-            apt-get update
-        fi
-    else
-        apt-get update
-        apt-get install vim net-tools pkg-config build-essential ca-certificates iproute2 libgnutls28-dev libwrap0-dev liblz4-dev libseccomp-dev libreadline-dev libnl-nf-3-dev libev-dev gnutls-bin ipcalc -y
-    fi
+            apt-get install -y vim net-tools pkg-config build-essential ca-certificates wget iproute2 procps iptables openssl libgnutls28-dev libwrap0-dev liblz4-dev libseccomp-dev libreadline-dev libnl-nf-3-dev libev-dev gnutls-bin ipcalc
+            ;;
+        dnf)
+            # RHEL derivatives (CentOS/Rocky/Alma/OpenEuler...) get extra deps from EPEL
+            if [[ "${release}" != "fedora" ]]; then
+                dnf install -y epel-release >/dev/null 2>&1
+            fi
+            dnf install -y vim net-tools pkgconf-pkg-config gcc make ca-certificates wget iproute procps-ng iptables openssl gnutls-devel libseccomp-devel libev-devel libnl3-devel readline-devel lz4-devel gnutls-utils ipcalc
+            ;;
+        yum)
+            yum install -y epel-release >/dev/null 2>&1
+            yum install -y vim net-tools pkgconfig gcc make ca-certificates wget iproute procps-ng iptables openssl gnutls-devel libseccomp-devel libev-devel libnl3-devel readline-devel lz4-devel gnutls-utils ipcalc
+            ;;
+        pacman)
+            pacman -Sy --noconfirm base-devel vim net-tools gnutls libseccomp libev libnl readline ca-certificates wget iproute2 procps-ng iptables openssl lz4 ipcalc
+            ;;
+        zypper)
+            zypper -n install gcc make vim net-tools pkg-config gnutls-devel libseccomp-devel libev-devel libnl3-devel readline-devel liblz4-devel ca-certificates wget iproute2 procps iptables openssl ipcalc
+            ;;
+        *)
+            echo -e "${Error} Unknown package manager, cannot install dependencies !" && exit 1 ;;
+    esac
 }
 Install_ocserv(){
     check_root
@@ -184,7 +251,7 @@ Install_ocserv(){
     Installation_dependency
     echo -e "${Info} Start to download/install config file..."
     Download_ocserv
-    echo -e "${Info} Start to download/install service script(init)..."
+    echo -e "${Info} Start to install systemd service units..."
     Service_ocserv
     echo -e "${Info} Start to self-sign SSL cert..."
     Generate_SSL
@@ -207,7 +274,11 @@ Start_ocserv(){
     check_installed_status
     check_pid
     [[ ! -z ${PID} ]] && echo -e "${Error} ocserv is running !" && exit 1
-    /etc/init.d/ocserv start
+    if have_systemd; then
+        systemctl start ocserv
+    else
+        ${file} -c ${conf}
+    fi
     sleep 2s
     check_pid
     [[ ! -z ${PID} ]] && View_Config
@@ -216,13 +287,21 @@ Stop_ocserv(){
     check_installed_status
     check_pid
     [[ -z ${PID} ]] && echo -e "${Error} ocserv is NOT running !" && exit 1
-    /etc/init.d/ocserv stop
+    if have_systemd; then
+        systemctl stop ocserv
+    else
+        [[ ! -z ${PID} ]] && kill ${PID}
+    fi
 }
 Restart_ocserv(){
     check_installed_status
-    check_pid
-    [[ ! -z ${PID} ]] && /etc/init.d/ocserv stop
-    /etc/init.d/ocserv start
+    if have_systemd; then
+        systemctl restart ocserv
+    else
+        check_pid
+        [[ ! -z ${PID} ]] && kill ${PID}
+        ${file} -c ${conf}
+    fi
     sleep 2s
     check_pid
     [[ ! -z ${PID} ]] && View_Config
@@ -482,9 +561,14 @@ View_Config(){
     echo && echo "==================================================="
 }
 View_Log(){
-    [[ ! -e ${log_file} ]] && echo -e "${Error} ocserv log doesn't exist !" && exit 1
-    echo && echo -e "${Tip} Press ${Red_font_prefix}Ctrl+C${Font_color_suffix} Stop View log" && echo -e "If you want to View all log, please use ${Red_font_prefix}cat ${log_file}${Font_color_suffix} command。" && echo
-    tail -f ${log_file}
+    if have_systemd; then
+        echo && echo -e "${Tip} Press ${Red_font_prefix}Ctrl+C${Font_color_suffix} to stop viewing logs" && echo
+        journalctl -u ocserv -f --no-pager
+    else
+        [[ ! -e ${log_file} ]] && echo -e "${Error} ocserv log doesn't exist !" && exit 1
+        echo && echo -e "${Tip} Press ${Red_font_prefix}Ctrl+C${Font_color_suffix} Stop View log" && echo -e "If you want to View all log, please use ${Red_font_prefix}cat ${log_file}${Font_color_suffix} command。" && echo
+        tail -f ${log_file}
+    fi
 }
 Uninstall_ocserv(){
     check_installed_status "un"
@@ -498,8 +582,11 @@ Uninstall_ocserv(){
         Read_config
         Del_iptables "${tcp_port}" "${udp_port}"
         Save_iptables
-        update-rc.d -f ocserv remove
-        rm -rf /etc/init.d/ocserv
+        if have_systemd; then
+            systemctl disable --now ocserv ocserv-firewall >/dev/null 2>&1
+            rm -f /etc/systemd/system/ocserv.service /etc/systemd/system/ocserv-firewall.service
+            systemctl daemon-reload
+        fi
         rm -rf "${conf_file}"
         rm -f "${log_file}"
         rm -f /usr/local/bin/occtl /usr/local/bin/ocpasswd /usr/local/bin/ocserv-fw
@@ -511,8 +598,11 @@ Uninstall_ocserv(){
     fi
 }
 over(){
-    update-rc.d -f ocserv remove
-    rm -rf /etc/init.d/ocserv
+    if have_systemd; then
+        systemctl disable --now ocserv ocserv-firewall >/dev/null 2>&1
+        rm -f /etc/systemd/system/ocserv.service /etc/systemd/system/ocserv-firewall.service
+        systemctl daemon-reload
+    fi
     rm -rf "${conf_file}"
     rm -f "${log_file}"
     rm -f /usr/local/bin/occtl /usr/local/bin/ocpasswd /usr/local/bin/ocserv-fw
@@ -554,8 +644,7 @@ Set_iptables(){
         iptables -t nat -A POSTROUTING -o ${Network_card} -j MASQUERADE
     
     iptables-save > /etc/iptables.up.rules
-    echo -e '#!/bin/bash\n/sbin/iptables-restore < /etc/iptables.up.rules' > /etc/network/if-pre-up.d/iptables
-    chmod +x /etc/network/if-pre-up.d/iptables
+    Firewall_Service_ocserv
 }
 # Ensure CRL files exist and minimal template
 Ensure_CRL(){
@@ -698,7 +787,7 @@ Update_Shell(){
     echo -e "${Info} Script updated to latest [ ${sh_new_ver} ], please re-run it !" && exit 0
 }
 check_sys
-[[ ${release} != "debian" ]] && [[ ${release} != "ubuntu" ]] && echo -e "${Error} OS is not supported ${release} !" && exit 1
+[[ -z "${pm}" ]] && echo -e "${Error} Your distro is not supported (unknown distro or package manager)! Supported: Debian/Ubuntu, RHEL family (CentOS/Rocky/Alma/Fedora...), Arch, openSUSE." && exit 1
 echo && echo -e " ocserv 1key install and conf script ${Red_font_prefix}[v${sh_ver}]${Font_color_suffix}
   -- Toyo | doub.io/vpnzy-7 --
   

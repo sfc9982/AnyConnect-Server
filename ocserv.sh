@@ -2,7 +2,7 @@
 PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:~/bin
 export PATH
 
-sh_ver="2.0.0"
+sh_ver="2.1.0"
 file="/usr/local/sbin/ocserv"
 conf_file="/etc/ocserv"
 conf="/etc/ocserv/ocserv.conf"
@@ -32,22 +32,37 @@ check_root(){
 }
 #检查系统
 check_sys(){
-	if [[ -f /etc/redhat-release ]]; then
-		release="centos"
-	elif cat /etc/issue | grep -q -E -i "debian"; then
-		release="debian"
-	elif cat /etc/issue | grep -q -E -i "ubuntu"; then
-		release="ubuntu"
-	elif cat /etc/issue | grep -q -E -i "centos|red hat|redhat"; then
-		release="centos"
-	elif cat /proc/version | grep -q -E -i "debian"; then
-		release="debian"
-	elif cat /proc/version | grep -q -E -i "ubuntu"; then
-		release="ubuntu"
-	elif cat /proc/version | grep -q -E -i "centos|red hat|redhat"; then
-		release="centos"
-    fi
-	#bit=`uname -m`
+	# 识别发行版与包管理器：优先 /etc/os-release，旧系统回退传统检测
+	# release: debian/ubuntu/rhel/rocky/almalinux/fedora/arch/opensuse...  pm: 对应包管理器
+	release=""
+	pm=""
+	if [[ -f /etc/os-release ]]; then
+		. /etc/os-release 2>/dev/null
+		release="${ID}"
+		case "${release}" in
+			debian|ubuntu|linuxmint|deepin|kali|raspbian)
+				pm="apt-get" ;;
+			rhel|centos|rocky|almalinux|anolis|openeuler|opencloudos|amzn)
+				pm="dnf"
+				command -v dnf >/dev/null 2>&1 || pm="yum" ;;
+			fedora|mageia)
+				pm="dnf" ;;
+			arch|manjaro|endeavouros|artix)
+				pm="pacman" ;;
+			opensuse*|sles|suse)
+				pm="zypper" ;;
+		esac
+	fi
+	if [[ -z "${pm}" ]]; then
+		if [[ -f /etc/redhat-release ]]; then
+			release="rhel"
+			pm="yum"; command -v dnf >/dev/null 2>&1 && pm="dnf"
+		elif grep -q -E -i "debian" /etc/issue 2>/dev/null; then
+			release="debian"; pm="apt-get"
+		elif grep -q -E -i "ubuntu" /etc/issue 2>/dev/null; then
+			release="ubuntu"; pm="apt-get"
+		fi
+	fi
 }
 check_installed_status(){
 	[[ ! -e ${file} ]] && echo -e "${Error} ocserv 没有安装，请检查 !" && exit 1
@@ -94,13 +109,59 @@ Download_ocserv(){
 		echo -e "${Error} ocserv 编译安装失败，请检查！" && exit 1
 	fi
 }
+# 是否使用 systemd 管理服务（主流发行版默认具备）
+have_systemd(){
+	command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]
+}
 Service_ocserv(){
-	if ! wget https://raw.githubusercontent.com/ToyoDAdoubiBackup/doubi/master/service/ocserv_debian -O /etc/init.d/ocserv; then
-		echo -e "${Error} ocserv 服务 管理脚本下载失败 !" && over
+	# 内联 systemd 单元文件，替代原先下载第三方 init.d 脚本（消除外部供应链依赖）
+	if have_systemd; then
+		cat > /etc/systemd/system/ocserv.service <<EOF
+[Unit]
+Description=OpenConnect SSL VPN server (Cisco AnyConnect compatible)
+Documentation=https://ocserv.gitlab.io/www/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+PIDFile=/var/run/ocserv.pid
+ExecStart=/usr/local/sbin/ocserv -c /etc/ocserv/ocserv.conf
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+EOF
+		systemctl daemon-reload
+		systemctl enable ocserv >/dev/null 2>&1
+		echo -e "${Info} ocserv systemd 服务单元已安装并设置开机启动 !"
+	else
+		# 无 systemd 的极简环境(Docker/OpenVZ等)：退化为直接守护进程，由 start/stop 函数管理
+		echo -e "${Tip} 未检测到 systemd，将以守护进程方式直接管理 ocserv（无开机自启）。"
 	fi
-	chmod +x /etc/init.d/ocserv
-	update-rc.d -f ocserv defaults
-	echo -e "${Info} ocserv 服务 管理脚本下载完成 !"
+}
+Firewall_Service_ocserv(){
+	# 开机恢复 iptables 规则的 systemd 单元（替代 Debian 专属的 if-pre-up.d 钩子，跨发行版通用）
+	have_systemd || return 0
+	cat > /etc/systemd/system/ocserv-firewall.service <<EOF
+[Unit]
+Description=Restore ocserv iptables firewall rules
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'iptables-restore < /etc/iptables.up.rules'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+	systemctl daemon-reload
+	systemctl enable ocserv-firewall >/dev/null 2>&1
 }
 rand(){
 	min=10000
@@ -153,26 +214,32 @@ tls_www_server' > server.tmpl
 }
 Installation_dependency(){
 	[[ ! -e "/dev/net/tun" ]] && echo -e "${Error} 你的VPS没有开启TUN，请联系IDC或通过VPS控制面板打开TUN/TAP开关 !" && exit 1
-	if [[ ${release} = "centos" ]]; then
-		echo -e "${Error} 本脚本不支持 CentOS 系统 !" && exit 1
-	elif [[ ${release} = "debian" ]]; then
-		cat /etc/issue |grep 9\..*>/dev/null
-		if [[ $? = 0 ]]; then
+	case "${pm}" in
+		apt-get)
+			export DEBIAN_FRONTEND=noninteractive
 			apt-get update
-			apt-get install vim net-tools pkg-config build-essential ca-certificates iproute2 libgnutls28-dev libwrap0-dev liblz4-dev libseccomp-dev libreadline-dev libnl-nf-3-dev libev-dev gnutls-bin ipcalc -y
-		else
-			mv /etc/apt/sources.list /etc/apt/sources.list.bak
-			wget -O "/etc/apt/sources.list" "https://raw.githubusercontent.com/ToyoDAdoubiBackup/doubi/master/sources/us.sources.list"
-			apt-get update
-			apt-get install vim net-tools pkg-config build-essential ca-certificates iproute2 libgnutls28-dev libwrap0-dev liblz4-dev libseccomp-dev libreadline-dev libnl-nf-3-dev libev-dev gnutls-bin ipcalc -y
-			rm -rf /etc/apt/sources.list
-			mv /etc/apt/sources.list.bak /etc/apt/sources.list
-			apt-get update
-		fi
-	else
-		apt-get update
-		apt-get install vim net-tools pkg-config build-essential ca-certificates iproute2 libgnutls28-dev libwrap0-dev liblz4-dev libseccomp-dev libreadline-dev libnl-nf-3-dev libev-dev gnutls-bin ipcalc -y
-	fi
+			apt-get install -y vim net-tools pkg-config build-essential ca-certificates wget iproute2 procps iptables openssl libgnutls28-dev libwrap0-dev liblz4-dev libseccomp-dev libreadline-dev libnl-nf-3-dev libev-dev gnutls-bin ipcalc
+			;;
+		dnf)
+			# RHEL 及其衍生版(CentOS/Rocky/Alma/OpenEuler等)经 EPEL 获取部分依赖
+			if [[ "${release}" != "fedora" ]]; then
+				dnf install -y epel-release >/dev/null 2>&1
+			fi
+			dnf install -y vim net-tools pkgconf-pkg-config gcc make ca-certificates wget iproute procps-ng iptables openssl gnutls-devel libseccomp-devel libev-devel libnl3-devel readline-devel lz4-devel gnutls-utils ipcalc
+			;;
+		yum)
+			yum install -y epel-release >/dev/null 2>&1
+			yum install -y vim net-tools pkgconfig gcc make ca-certificates wget iproute procps-ng iptables openssl gnutls-devel libseccomp-devel libev-devel libnl3-devel readline-devel lz4-devel gnutls-utils ipcalc
+			;;
+		pacman)
+			pacman -Sy --noconfirm base-devel vim net-tools gnutls libseccomp libev libnl readline ca-certificates wget iproute2 procps-ng iptables openssl lz4 ipcalc
+			;;
+		zypper)
+			zypper -n install gcc make vim net-tools pkg-config gnutls-devel libseccomp-devel libev-devel libnl3-devel readline-devel liblz4-devel ca-certificates wget iproute2 procps iptables openssl ipcalc
+			;;
+		*)
+			echo -e "${Error} 未识别的包管理器，无法安装依赖 !" && exit 1 ;;
+	esac
 }
 
 # === 新增：CRL/证书认证 相关函数（与 ocserv-en.sh 对齐） ===
@@ -247,7 +314,7 @@ Install_ocserv(){
 	Installation_dependency
 	echo -e "${Info} 开始下载/安装 配置文件..."
 	Download_ocserv
-	echo -e "${Info} 开始下载/安装 服务脚本(init)..."
+	echo -e "${Info} 开始安装 systemd 服务单元..."
 	Service_ocserv
 	echo -e "${Info} 开始自签SSL证书..."
 	Generate_SSL
@@ -271,7 +338,11 @@ Start_ocserv(){
 	check_installed_status
 	check_pid
 	[[ ! -z ${PID} ]] && echo -e "${Error} ocserv 正在运行，请检查 !" && exit 1
-	/etc/init.d/ocserv start
+	if have_systemd; then
+		systemctl start ocserv
+	else
+		${file} -c ${conf}
+	fi
 	sleep 2s
 	check_pid
 	[[ ! -z ${PID} ]] && View_Config
@@ -280,13 +351,21 @@ Stop_ocserv(){
 	check_installed_status
 	check_pid
 	[[ -z ${PID} ]] && echo -e "${Error} ocserv 没有运行，请检查 !" && exit 1
-	/etc/init.d/ocserv stop
+	if have_systemd; then
+		systemctl stop ocserv
+	else
+		[[ ! -z ${PID} ]] && kill ${PID}
+	fi
 }
 Restart_ocserv(){
 	check_installed_status
-	check_pid
-	[[ ! -z ${PID} ]] && /etc/init.d/ocserv stop
-	/etc/init.d/ocserv start
+	if have_systemd; then
+		systemctl restart ocserv
+	else
+		check_pid
+		[[ ! -z ${PID} ]] && kill ${PID}
+		${file} -c ${conf}
+	fi
 	sleep 2s
 	check_pid
 	[[ ! -z ${PID} ]] && View_Config
@@ -640,9 +719,14 @@ View_Config(){
 	echo && echo "==================================================="
 }
 View_Log(){
-	[[ ! -e ${log_file} ]] && echo -e "${Error} ocserv 日志文件不存在 !" && exit 1
-	echo && echo -e "${Tip} 按 ${Red_font_prefix}Ctrl+C${Font_color_suffix} 终止查看日志" && echo -e "如果需要查看完整日志内容，请用 ${Red_font_prefix}cat ${log_file}${Font_color_suffix} 命令。" && echo
-	tail -f ${log_file}
+	if have_systemd; then
+		echo && echo -e "${Tip} 按 ${Red_font_prefix}Ctrl+C${Font_color_suffix} 终止查看日志" && echo
+		journalctl -u ocserv -f --no-pager
+	else
+		[[ ! -e ${log_file} ]] && echo -e "${Error} ocserv 日志文件不存在 !" && exit 1
+		echo && echo -e "${Tip} 按 ${Red_font_prefix}Ctrl+C${Font_color_suffix} 终止查看日志" && echo -e "如果需要查看完整日志内容，请用 ${Red_font_prefix}cat ${log_file}${Font_color_suffix} 命令。" && echo
+		tail -f ${log_file}
+	fi
 }
 Uninstall_ocserv(){
 	check_installed_status "un"
@@ -656,8 +740,11 @@ Uninstall_ocserv(){
 		Read_config
 		Del_iptables "${tcp_port}" "${udp_port}"
 		Save_iptables
-		update-rc.d -f ocserv remove
-		rm -rf /etc/init.d/ocserv
+		if have_systemd; then
+			systemctl disable --now ocserv ocserv-firewall >/dev/null 2>&1
+			rm -f /etc/systemd/system/ocserv.service /etc/systemd/system/ocserv-firewall.service
+			systemctl daemon-reload
+		fi
 		rm -rf "${conf_file}"
 		rm -f "${log_file}"
 		rm -f /usr/local/bin/occtl /usr/local/bin/ocpasswd /usr/local/bin/ocserv-fw
@@ -669,8 +756,11 @@ Uninstall_ocserv(){
 	fi
 }
 over(){
-	update-rc.d -f ocserv remove
-	rm -rf /etc/init.d/ocserv
+	if have_systemd; then
+		systemctl disable --now ocserv ocserv-firewall >/dev/null 2>&1
+		rm -f /etc/systemd/system/ocserv.service /etc/systemd/system/ocserv-firewall.service
+		systemctl daemon-reload
+	fi
 	rm -rf "${conf_file}"
 	rm -f "${log_file}"
 	rm -f /usr/local/bin/occtl /usr/local/bin/ocpasswd /usr/local/bin/ocserv-fw
@@ -712,8 +802,7 @@ Set_iptables(){
 		iptables -t nat -A POSTROUTING -o ${Network_card} -j MASQUERADE
 	
 	iptables-save > /etc/iptables.up.rules
-	echo -e '#!/bin/bash\n/sbin/iptables-restore < /etc/iptables.up.rules' > /etc/network/if-pre-up.d/iptables
-	chmod +x /etc/network/if-pre-up.d/iptables
+	Firewall_Service_ocserv
 }
 
 Update_Shell(){
@@ -731,7 +820,7 @@ Update_Shell(){
 }
 
 check_sys
-[[ ${release} != "debian" ]] && [[ ${release} != "ubuntu" ]] && echo -e "${Error} 本脚本不支持当前系统 ${release} !" && exit 1
+[[ -z "${pm}" ]] && echo -e "${Error} 不支持当前系统(未识别的发行版或包管理器)！支持 Debian/Ubuntu、RHEL 系(CentOS/Rocky/Alma/Fedora等)、Arch、openSUSE。" && exit 1
 echo && echo -e " ocserv 一键安装管理脚本 ${Red_font_prefix}[v${sh_ver}]${Font_color_suffix}
   -- Toyo | doub.io/vpnzy-7 --
   

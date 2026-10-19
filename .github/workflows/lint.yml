@@ -1,0 +1,30 @@
+name: Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  shellcheck:
+    name: ShellCheck + syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bash syntax check
+        run: |
+          bash -n ocserv.sh
+          bash -n ocserv-en.sh
+
+      - name: ShellCheck (error level)
+        run: |
+          shellcheck --version
+          shellcheck -S error ocserv.sh ocserv-en.sh
+
+      - name: Guard no plaintext transport / third-party script download
+        run: |
+          ! grep -nE 'ftp://|http://' ocserv.sh ocserv-en.sh
+          ! grep -n 'no-check-certificate' ocserv.sh ocserv-en.sh
+          ! grep -n 'ToyoDAdoubiBackup/doubi' ocserv.sh ocserv-en.sh
