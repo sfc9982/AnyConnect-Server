@@ -48,6 +48,12 @@ check_script() (
     Set_Conf_Value udp-port 8443
     Set_Conf_Value crl /etc/ocserv/ssl/crl.pem
     grep -Fxq 'tcp-port = 8443' "$conf"
+    if grep -Fxq 'tcp-port = 443' "$conf" ||
+        [[ "$(grep -Ec '^[[:space:]]*tcp-port[[:space:]]*=' "$conf")" -ne 1 ]]; then
+        cat "$conf"
+        echo "$script: expected exactly one updated tcp-port entry" >&2
+        exit 1
+    fi
     grep -Fxq 'udp-port = 8443' "$conf"
     grep -Fxq 'dns = 8.8.8.8' "$conf"
     grep -Fxq 'crl = /etc/ocserv/ssl/crl.pem' "$conf"
