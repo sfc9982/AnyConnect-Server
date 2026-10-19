@@ -1,195 +1,195 @@
 # AnyConnect-Server
 
-[English Version](/README.EN.md)
+[简体中文](/README.zh-CN.md)
 
-在 Linux 服务器上一键部署**与 Cisco AnyConnect 官方客户端兼容的 SSL VPN**。部署完成后，手机和电脑直接使用思科官方的 AnyConnect 客户端即可连接，无需安装任何第三方 App。
+One-click deployment of an **SSL VPN server compatible with the official Cisco AnyConnect client** on Linux. Once deployed, phones and computers connect using Cisco's official AnyConnect client — no third-party app required.
 
-- 服务端：ocserv 1.3.0（OpenConnect 官方服务端实现，源码编译安装至 /usr/local）
-- 客户端：Cisco AnyConnect 官方客户端（Windows / macOS / Android / iOS / Linux）
-- 账号体系：客户端证书 + 账号密码双通道；删除用户即永久吊销证书，临时禁用可随时恢复
-- 认证与吊销变更实时生效，无需重启服务
+- Server: ocserv 1.3.0 (the official OpenConnect server implementation, compiled from source into /usr/local)
+- Client: the official Cisco AnyConnect client (Windows / macOS / Android / iOS / Linux)
+- Accounts: client certificate + password, two independent channels; deleting a user permanently revokes the certificate, suspension can be lifted at any time
+- Auth and revocation changes take effect immediately — no service restart needed
 
-## 功能特性
+## Features
 
-- 一条命令完成全部部署：编译、证书、防火墙 NAT、systemd 服务、首个账号
-- 每个用户一份客户端证书包（.p12），思科客户端直接导入使用
-- 完整的证书生命周期管理：新增 / 删除（永久吊销）/ 临时禁用 / 恢复
-- 证书吊销列表（CRL）由脚本自动重建并对服务热加载
-- 默认分流模式：内置中国大陆 IP 段直连表，国内流量不走 VPN，其余流量走 VPN
-- 跨发行版：Debian / Ubuntu / RHEL 系 / Fedora / Arch / openSUSE
-- 不下载任何第三方脚本来完成安装（systemd 单元由脚本内联生成）
+- One command deploys everything: build, certificates, firewall NAT, systemd service, first account
+- One client certificate bundle (.p12) per user, imported directly by the Cisco client
+- Full certificate lifecycle: add / delete (permanent revoke) / suspend / restore
+- The Certificate Revocation List (CRL) is rebuilt automatically and hot-reloaded by the server
+- Split tunneling by default: a built-in direct-route table keeps domestic traffic off the VPN while the rest goes through it
+- Cross-distro: Debian / Ubuntu / RHEL family / Fedora / Arch / openSUSE
+- No third-party script is downloaded during installation (systemd units are generated inline)
 
-## 运行要求
+## Requirements
 
-| 项目 | 要求 |
+| Item | Requirement |
 |---|---|
-| 服务器 | 一台有独立公网 IP 的 VPS（KVM / Xen 等全虚拟化架构） |
-| 系统 | 见下方支持列表，使用 systemd（主流发行版默认具备） |
-| 虚拟网卡 | 已开启 TUN/TAP（安装时脚本会自动检测，未开启会给出提示） |
-| 权限 | 能以 root 身份执行命令（或拥有 sudo 权限的账号） |
-| 域名 | 可选。直接使用 IP 即可连接；有域名体验更好（证书可绑定域名） |
+| Server | A VPS with a dedicated public IP (KVM / Xen or other full virtualization) |
+| OS | See the supported list below; systemd-based (default on mainstream distros) |
+| Virtual NIC | TUN/TAP enabled (checked automatically during install) |
+| Privileges | Able to run commands as root (or an account with sudo) |
+| Domain name | Optional. A plain IP works; a domain name makes certificates and daily use nicer |
 
-## 支持的系统
+## Supported systems
 
-| 发行版 | 版本 | 包管理器 |
+| Distro | Versions | Package manager |
 |---|---|---|
 | Debian | 11 / 12 | apt |
 | Ubuntu | 20.04 / 22.04 / 24.04 | apt |
-| RHEL / CentOS / Rocky / AlmaLinux / OpenEuler 等 | 8 / 9 及以后 | dnf / yum（依赖 EPEL） |
+| RHEL / CentOS / Rocky / AlmaLinux / OpenEuler etc. | 8 / 9 and later | dnf / yum (EPEL) |
 | Fedora | 38+ | dnf |
 | Arch Linux / Manjaro | rolling | pacman |
 | openSUSE Leap | 15 | zypper |
 
-说明：systemd 缺失的极简环境（Docker / OpenVZ）仍可运行，但不会开机自启。
+Note: minimal environments without systemd (Docker / OpenVZ) still work, but without boot autostart.
 
-## 快速开始（约 5 分钟）
+## Quick start (about 5 minutes)
 
-整个过程大部分时间是在等待编译。按以下步骤操作：
+Most of the time is spent waiting for the build.
 
 ```bash
-# 1. SSH 登录服务器，切换为 root
+# 1. SSH into the server and become root
 sudo su
 
-# 2. 下载并运行脚本
-wget -N https://raw.githubusercontent.com/sfc9982/AnyConnect-Server/main/ocserv.sh
-chmod +x ocserv.sh
-bash ocserv.sh
+# 2. Download and run the script
+wget -N https://raw.githubusercontent.com/sfc9982/AnyConnect-Server/main/ocserv-en.sh
+chmod +x ocserv-en.sh
+bash ocserv-en.sh
 ```
 
-首次运行输入 `1` 开始安装。安装过程中脚本会依次询问几件事：
+Enter `1` to start the installation. The script will ask a few questions along the way:
 
-| 询问项 | 说明 | 建议 |
+| Prompt | Meaning | Suggestion |
 |---|---|---|
-| VPN 账号用户名 | 第一个管理员账号，默认 admin | 改成一个只有你知道的名称 |
-| VPN 账号密码 | 必填，输入时不显示 | 设置强密码；该密码同时是证书包（.p12）的导出密码 |
-| TCP 端口 | 默认 443 | 保持 443，最不易被阻断 |
-| UDP 端口 | 默认与 TCP 相同 | 保持默认；UDP 通道影响语音 / 视频流畅度 |
+| VPN username | The first account, default `admin` | Pick a name only you know |
+| VPN password | Required, hidden while typing | Use a strong password; it doubles as the .p12 export password |
+| TCP port | Default 443 | Keep 443 — the least likely to be blocked |
+| UDP port | Same as TCP by default | Keep the default; the UDP channel affects voice/video quality |
 
-安装结束后脚本会打印服务器信息，客户端里填写的地址形如 `123.45.67.89:443`。
+When the installation finishes, the script prints your server info. The address to enter in the client looks like `123.45.67.89:443`.
 
-## 安装过程做了什么
+## What the installer does
 
-按顺序执行，任一步骤失败会自动清理已更改的内容：
+Steps run in order; if any step fails, changes are rolled back automatically:
 
-1. 检测系统与 TUN/TAP
-2. 安装编译依赖（gnutls、libev、seccomp、libnl 等）及 iptables、openssl
-3. 从官方网站下载 ocserv 1.3.0 源码，编译安装
-4. 生成自签名 CA 与服务器证书（服务器证书绑定你的 IP）
-5. 生成证书吊销列表（CRL），启用「证书优先 + 密码兜底」认证
-6. 创建第一个账号（证书 + 密码同时生成）
-7. 开启内核转发与 iptables NAT，放行服务端口，写入开机恢复规则
-8. 启动服务并自检，打印连接信息
+1. Detect the OS and TUN/TAP
+2. Install build dependencies (gnutls, libev, seccomp, libnl, ...) plus iptables and openssl
+3. Download the ocserv 1.3.0 source from the official site and compile it
+4. Generate a self-signed CA and server certificate (bound to your IP)
+5. Generate the CRL and enable "certificate first, password fallback" authentication
+6. Create the first account (certificate and password together)
+7. Enable IP forwarding and iptables NAT, open the service ports, persist rules for boot
+8. Start the service, self-check, and print connection info
 
-## 客户端连接
+## Connecting from a client
 
-服务端为每个用户生成一个 `.p12` 证书包，位于 `/etc/ocserv/ssl/users/<用户名>/<用户名>.p12`，需要先把它下载到要连接的设备上。
+The server generates one `.p12` certificate bundle per user at `/etc/ocserv/ssl/users/<username>/<username>.p12`. Download it to the device you want to connect from.
 
-### 第一步：导入证书包
+### Step 1: import the certificate bundle
 
-导入时需要输入密码，即该用户的 VPN 密码。
+The import password is that user's VPN password.
 
-- **Windows**：双击 `.p12` 文件 → 存储位置选择「当前用户」→ 输入密码 → 按向导完成。
-- **macOS**：双击导入「登录」钥匙串，在「钥匙串访问」中确认该证书存在。
-- **Android**：将文件放到手机存储 → 设置 → 安全 → 加密与凭据 → 从存储设备安装（部分机型在「更多安全设置」内）→ 输入密码。
-- **iOS / iPadOS**：将文件发送到设备（AirDrop / 文件 App / 邮件均可）→ 点击文件 → 设置 → 通用 → VPN 与设备管理 → 安装描述文件；随后进入 设置 → 通用 → 关于本机 → 证书信任设置，打开对该证书的信任开关。
+- **Windows**: double-click the `.p12` → Current User → enter the password → finish the wizard.
+- **macOS**: double-click to import into the "login" keychain, then confirm it exists in Keychain Access.
+- **Android**: copy the file to phone storage → Settings → Security → Encryption & credentials → Install from storage (some vendors put this under "More security settings") → enter the password.
+- **iOS / iPadOS**: send the file to the device (AirDrop / Files app / mail) → tap it → Settings → General → VPN & Device Management → install the profile; then go to Settings → General → About → Certificate Trust Settings and enable trust for that certificate.
 
-### 第二步：连接
+### Step 2: connect
 
-1. 打开 AnyConnect，地址栏填写 `服务器IP:端口`（例如 `123.45.67.89:443`；有域名则填域名）
-2. 首次连接可能提示证书不受信任或无法验证服务器——这是自签名证书的正常现象，选择继续即可（想要消除该提示，可将服务器上的 `/etc/ocserv/ssl/ca-cert.pem` 根证书一并导入并信任）
-3. 当客户端要求选择证书时，选择你的用户名对应的证书
-4. 输入账号密码，连接
-5. 状态显示「已连接」即表示成功
+1. Open AnyConnect and enter `server-IP:port` (e.g. `123.45.67.89:443`; use the domain name if you have one)
+2. The first connection may warn that the certificate is untrusted — this is expected with a self-signed CA; choose to continue (to remove the warning, also import and trust `/etc/ocserv/ssl/ca-cert.pem` on the client)
+3. When asked to pick a certificate, choose the one named after your username
+4. Enter your username and password, then connect
+5. "Connected" means success
 
-### 连接后的行为
+### After connecting
 
-- 国内网站与 App 直连（走本地网络，不经 VPN）
-- 其余流量经 VPN 到服务器后访问互联网
-- 如需改为全局走 VPN：编辑 `/etc/ocserv/ocserv.conf`，删除所有 `no-route` 行，然后重启服务
+- Domestic sites and apps go directly through your local network
+- Everything else goes through the VPN to your server and out to the internet
+- To route everything through the VPN: edit `/etc/ocserv/ocserv.conf`, delete every `no-route` line, then restart the service
 
-## 日常管理
+## Day-to-day management
 
-再次执行 `bash ocserv.sh` 进入管理菜单：
+Run `bash ocserv-en.sh` again to open the menu:
 
-| 选项 | 功能 |
+| Option | Function |
 |---|---|
-| 0 | 从本仓库升级脚本（通过语法校验后才覆盖） |
-| 1 / 2 | 安装 / 卸载 |
-| 3 / 4 / 5 | 启动 / 停止 / 重启 |
-| 6 | 账号管理：0 列表、1 添加、2 删除、3 启用 / 禁用 |
-| 7 | 查看服务器地址、端口等信息 |
-| 8 | 编辑配置文件（vim），端口变更后防火墙自动同步 |
-| 9 | 查看实时日志 |
+| 0 | Update the script from this repo (overwritten only after a syntax check passes) |
+| 1 / 2 | Install / uninstall |
+| 3 / 4 / 5 | Start / stop / restart |
+| 6 | Accounts: 0 list, 1 add, 2 delete, 3 enable/disable |
+| 7 | Show server address, ports and other info |
+| 8 | Edit the config file (vim); firewall rules sync automatically on port changes |
+| 9 | View live logs |
 
-账号管理的几个关键点：
+Key points about account management:
 
-- **添加用户**：证书与密码一次性生成。把生成的 `.p12` 文件通过安全渠道发给使用者
-- **删除用户**：证书写入 CRL 永久吊销并删除本地文件，密码账户同步删除，该设备上已导入的证书立即失效
-- **禁用 / 启用**：证书进入临时封存状态，可随时恢复；恢复后同一份证书继续有效，用户无需重新导入
-- 以上操作均实时生效，不需要重启 VPN 服务
+- **Add**: certificate and password are generated together. Send the resulting `.p12` to the user over a secure channel
+- **Delete**: the certificate is written into the CRL (permanently revoked) and local files are removed; the password account is removed as well, and any already-imported certificate on the device stops working immediately
+- **Disable / enable**: the certificate is archived temporarily and can be restored at any time; after restore the same certificate keeps working, no re-import needed
+- All account operations take effect immediately — no service restart required
 
-## 文件与命令速查
+## Files and commands cheat sheet
 
-| 内容 | 位置 / 命令 |
+| Content | Location / command |
 |---|---|
-| 主配置 | `/etc/ocserv/ocserv.conf` |
-| CA 证书 / 私钥 | `/etc/ocserv/ssl/ca-cert.pem` / `ca-key.pem`（私钥切勿外传） |
-| 用户证书包 | `/etc/ocserv/ssl/users/<用户名>/<用户名>.p12` |
-| 密码文件 | `/etc/ocserv/ocpasswd` |
-| 吊销列表 | `/etc/ocserv/ssl/crl.pem` |
-| 服务控制 | `systemctl start \| stop \| restart \| status ocserv` |
-| 日志 | `journalctl -u ocserv -f` |
-| 防火墙规则 | `/etc/iptables.up.rules`（开机由 ocserv-firewall.service 恢复） |
+| Main config | `/etc/ocserv/ocserv.conf` |
+| CA cert / key | `/etc/ocserv/ssl/ca-cert.pem` / `ca-key.pem` (never share the key) |
+| User bundles | `/etc/ocserv/ssl/users/<username>/<username>.p12` |
+| Password file | `/etc/ocserv/ocpasswd` |
+| Revocation list | `/etc/ocserv/ssl/crl.pem` |
+| Service control | `systemctl start \| stop \| restart \| status ocserv` |
+| Logs | `journalctl -u ocserv -f` |
+| Firewall rules | `/etc/iptables.up.rules` (restored at boot by ocserv-firewall.service) |
 
-## 升级与卸载
+## Upgrading and uninstalling
 
-- **升级脚本**：菜单 0。仅从本仓库拉取同名脚本，且通过语法检查才会覆盖
-- **升级 ocserv 版本**：先执行卸载（菜单 2），再重新安装（菜单 1）。建议先备份 `/etc/ocserv` 目录
-- **卸载**：菜单 2。会停止服务、移除 systemd 单元、清理防火墙规则与配置文件，不影响系统其他组件
+- **Update the script**: menu 0. Only the same-named script from this repo is fetched, and only installed if it passes a syntax check
+- **Upgrade ocserv itself**: uninstall first (menu 2), then install again (menu 1). Back up `/etc/ocserv` beforehand
+- **Uninstall**: menu 2. Stops the service, removes the systemd units, cleans firewall rules and config files; the rest of the system is untouched
 
-## 安全说明
+## Security notes
 
-1. **证书即身份**：获得某用户的 `.p12` 与密码，即可以该身份连接。证书包请通过安全渠道分发；一旦泄露，立即删除该用户（等同于吊销其证书）
-2. **CA 私钥只留在服务器上**：`/etc/ocserv/ssl/ca-key.pem` 权限为 600。任何拿到它的人都可以伪造你的服务端，请勿外传或备份到不可信位置
-3. **协议可被识别**：连接内容本身是加密的，但 AnyConnect 的协议特征在深度包检测（DPI）下相对容易识别。如果你所在的环境对 VPN 的使用进行监控或限制，请先评估风险再部署。本工具保障的是传输加密，不提供匿名性
-4. **自签名证书**：没有 CA 机构背书，第三方无法验证服务端真伪。可接受首次连接警告，或在拥有域名后申请受信任证书替换
-5. **其他建议**：使用强密码；及时清理不再使用的账号；保持系统与 ocserv 为较新版本
+1. **A certificate is an identity**: obtaining a user's `.p12` and password lets you connect as that user. Distribute bundles over secure channels; if one leaks, delete the user immediately (which revokes the certificate)
+2. **The CA private key stays on the server**: `/etc/ocserv/ssl/ca-key.pem` is mode 600. Anyone holding it can forge your VPN server — do not share it or back it up to untrusted locations
+3. **The protocol is fingerprintable**: traffic is encrypted, but the AnyConnect protocol itself is relatively easy to identify with deep packet inspection (DPI). If VPN usage is monitored or restricted in your environment, evaluate the risks before deploying. This tool provides transport encryption, not anonymity
+4. **Self-signed certificates**: no CA backing, so clients cannot verify the server's authenticity. Accept the first-connection warning, or replace with a trusted certificate once you have a domain name
+5. **Other advice**: use strong passwords; remove accounts you no longer need; keep the system and ocserv reasonably up to date
 
-## 常见问题
+## FAQ
 
-**Q：安装时提示没有 TUN/TAP？**
-A：脚本未检测到 `/dev/net/tun`。请在 VPS 控制面板确认已开启 TUN/TAP；OpenVZ 架构需联系服务商开启，若不支持则需更换 KVM / Xen 架构的 VPS。
+**Q: The installer says TUN/TAP is missing?**
+A: `/dev/net/tun` was not found. Enable TUN/TAP in your VPS control panel; on OpenVZ ask your provider to enable it, or move to a KVM / Xen based VPS.
 
-**Q：客户端连上了，但打不开网页？**
-A：多数是 VPS 提供商的「安全组 / 防火墙」未放行端口。请到提供商控制台放行 TCP 与 UDP 的 443（或你自定义的端口）。
+**Q: The client connects but web pages will not load?**
+A: Usually the provider's security group / firewall has not opened the port. Allow TCP and UDP 443 (or your custom port) in the provider console.
 
-**Q：提示「证书不受信任 / 无法验证服务器」？**
-A：自签名证书的正常现象，连接时选择继续即可；也可在客户端导入服务器上的 `ca-cert.pem` 根证书以消除警告。
+**Q: "Certificate untrusted / unable to verify server"?**
+A: Expected with a self-signed CA — continue at the connection prompt, or import the server's `ca-cert.pem` on the client to silence the warning.
 
-**Q：客户端提示没有可用证书？**
-A：`.p12` 未正确导入。请按上文对应平台的步骤重新导入；iOS 还需在「证书信任设置」中打开信任开关。
+**Q: The client says no certificate is available?**
+A: The `.p12` was not imported correctly. Re-import following the platform steps above; on iOS also enable trust in Certificate Trust Settings.
 
-**Q：手机频繁断线，或视频卡顿？**
-A：确认 UDP 端口已放行（DTLS 数据走 UDP）。部分网络对 UDP 限速时，可在客户端设置中切换为仅使用 TCP。
+**Q: Frequent disconnects or choppy video on mobile?**
+A: Make sure the UDP port is open (DTLS uses UDP). On networks that throttle UDP, switch the client to TCP-only.
 
-**Q：更换服务器或 IP 后怎么办？**
-A：服务器证书绑定 IP，需要在新服务器上重新安装，并重新分发证书包。
+**Q: What if I change server or IP?**
+A: The server certificate is bound to the IP, so reinstall on the new server and redistribute the certificate bundles.
 
-**Q：忘记账号密码？**
-A：菜单 6 → 删除该用户 → 重新添加。旧证书会同时被吊销。
+**Q: I forgot my account password?**
+A: Menu 6 → delete the user → add a new one. The old certificate is revoked at the same time.
 
-**Q：想更换端口？**
-A：菜单 8 编辑配置文件，修改 `tcp-port` / `udp-port`，防火墙规则会自动同步，随后重启服务。
+**Q: How do I change the port?**
+A: Menu 8, edit `tcp-port` / `udp-port` in the config; firewall rules sync automatically, then restart the service.
 
-**Q：如何完整备份？**
-A：备份整个 `/etc/ocserv` 目录即可（含配置、证书与账号）。
+**Q: How do I back everything up?**
+A: Back up the entire `/etc/ocserv` directory (config, certificates and accounts).
 
-**Q：如何升级 ocserv 本身？**
-A：本菜单的「升级脚本」只更新管理脚本。升级 ocserv 需先卸载再重装，卸载前请备份 `/etc/ocserv`。
+**Q: How do I upgrade ocserv itself?**
+A: Menu 0 only updates the management script. To upgrade ocserv, uninstall and reinstall — back up `/etc/ocserv` first.
 
-## 致谢与许可
+## Credits and license
 
-- 服务端基于 GNU ocserv，密码管理基于其自带的 ocpasswd
-- 脚本框架继承自 ToyoDAdoubi 的一键脚本传统，向其工作致谢
-- 多用户可视化管理可参考社区项目：<https://github.com/mmtaee/ocserv-users-management>
-- 本项目以 MIT 许可发布，Copyright (c) 2023 sfc9982
+- Server side is GNU ocserv; password management uses its bundled ocpasswd
+- The script framework inherits the tradition of ToyoDAdoubi's one-click scripts, whose work is gratefully acknowledged
+- For multi-user visual management, see the community project: <https://github.com/mmtaee/ocserv-users-management>
+- Released under the MIT License, Copyright (c) 2023 sfc9982
