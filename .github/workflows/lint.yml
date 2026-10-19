@@ -17,11 +17,12 @@ jobs:
         run: |
           bash -n ocserv.sh
           bash -n ocserv-en.sh
+          bash -n tests/smoke.sh
 
       - name: ShellCheck (error level)
         run: |
           shellcheck --version
-          shellcheck -S error ocserv.sh ocserv-en.sh
+          shellcheck -S error ocserv.sh ocserv-en.sh tests/smoke.sh
 
       - name: Guard no plaintext transport / third-party script download
         run: |

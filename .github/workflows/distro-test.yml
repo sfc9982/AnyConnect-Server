@@ -10,6 +10,9 @@ jobs:
   smoke:
     name: ${{ matrix.name }} (expect ${{ matrix.expect }})
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
@@ -23,51 +26,18 @@ jobs:
           - { name: "AlmaLinux 9",   image: "almalinux:9",      expect: "dnf" }
           - { name: "Arch Linux",    image: "archlinux:latest", expect: "pacman" }
           - { name: "openSUSE Leap", image: "opensuse/leap:15", expect: "zypper" }
-    container:
-      image: ${{ matrix.image }}
     steps:
+      # Checkout runs on the host; minimal distro images need no Git, tar, or Node.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
-      - name: Bash syntax check
+      - name: Run smoke tests in distro container (zh + en)
+        env:
+          DISTRO_IMAGE: ${{ matrix.image }}
+          EXPECTED_PM: ${{ matrix.expect }}
         run: |
-          bash -n ocserv.sh
-          bash -n ocserv-en.sh
-
-      - name: Distro detection (check_sys)
-        run: |
-          set -e
-          awk '/^check_sys\(\)\{/,/^\}/' ocserv.sh > /tmp/check_sys.sh
-          . /tmp/check_sys.sh
-          check_sys
-          echo "detected release=${release} pm=${pm}"
-          test -n "${pm}"
-          test "${pm}" = "${{ matrix.expect }}"
-
-      - name: Config helpers (Set_Conf_Value / sanitize_username)
-        run: |
-          set -e
-          awk '/^Set_Conf_Value\(\)\{/,/^\}/' ocserv.sh > /tmp/h1.sh
-          awk '/^sanitize_username\(\)\{/,/^\}/' ocserv.sh > /tmp/h2.sh
-          . /tmp/h1.sh
-          . /tmp/h2.sh
-          conf=/tmp/t.conf
-          printf 'tcp-port = 443\ndns = 8.8.8.8\n' > "$conf"
-          Set_Conf_Value tcp-port 8443
-          Set_Conf_Value udp-port 8443
-          Set_Conf_Value crl /etc/ocserv/ssl/crl.pem
-          grep -qx 'tcp-port = 8443' "$conf"
-          grep -qx 'udp-port = 8443' "$conf"
-          grep -qx 'dns = 8.8.8.8' "$conf"
-          grep -qx 'crl = /etc/ocserv/ssl/crl.pem' "$conf"
-          sanitize_username alice-1
-          sanitize_username alice_1
-          if sanitize_username 'a/b'; then exit 1; fi
-          if sanitize_username '..'; then exit 1; fi
-          if sanitize_username ''; then exit 1; fi
-
-      - name: Menu entry smoke test (zh + en)
-        run: |
-          echo "" | timeout 15 bash ocserv.sh > /tmp/menu_zh.out 2>&1 || true
-          grep -q "一键安装管理脚本" /tmp/menu_zh.out
-          echo "" | timeout 15 bash ocserv-en.sh > /tmp/menu_en.out 2>&1 || true
-          grep -q "install and conf script" /tmp/menu_en.out
+          docker run --rm \
+            --volume "${GITHUB_WORKSPACE}:/workspace:ro" \
+            --workdir /workspace \
+            "$DISTRO_IMAGE" bash tests/smoke.sh "$EXPECTED_PM"
