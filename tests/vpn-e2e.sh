@@ -403,9 +403,11 @@ server_action delete > "$log_dir/delete-repeat.log" 2>&1
 auth_result allow password e2e-control "$control_password" delete-repeat-control
 echo "PASS: $script certificate-only lifecycle and failed-CRL deletion retry"
 
-kill -TERM "$server_pid"
+server_action uninstall > "$log_dir/uninstall.log" 2>&1
+if kill -0 "$server_pid" 2>/dev/null; then fail 'uninstall left ocserv running'; fi
 wait "$server_pid" || true
 server_pid=''
+echo "PASS: $script full uninstall removes VPN firewall rules and preserves unrelated saved rules"
 echo "PASS: $script real VPN and account lifecycle"
 echo '::endgroup::'
 echo 'PASS: all real VPN end-to-end checks'

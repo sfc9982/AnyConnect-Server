@@ -1128,11 +1128,16 @@ Uninstall_ocserv(){
 	read -e -p "(默认: n):" unyn
 	[[ -z ${unyn} ]] && unyn="n"
 	if [[ ${unyn} == [Yy] ]]; then
-		check_pid
-		[[ ! -z $PID ]] && kill -9 ${PID} && rm -f ${PID_FILE}
-		Read_config
-		Del_iptables "${tcp_port}" "${udp_port}"
-		Save_iptables
+		local tcp_port udp_port
+		tcp_port=$(Get_Conf_Value tcp-port) || return 1
+		udp_port=$(Get_Conf_Value udp-port) || return 1
+		check_pid || return 1
+		if [[ -n "$PID" ]]; then
+			Stop_ocserv || return 1
+		fi
+		Del_iptables "$tcp_port" "$udp_port" || return 1
+		Remove_VPN_Forwarding_Rules || return 1
+		Save_iptables || return 1
 		if have_systemd; then
 			systemctl disable --now ocserv ocserv-firewall >/dev/null 2>&1
 			rm -f /etc/systemd/system/ocserv.service /etc/systemd/system/ocserv-firewall.service
@@ -1170,12 +1175,71 @@ Add_iptables(){
 	iptables -C INPUT -m state --state NEW -m udp -p udp --dport ${udp_port} -j ACCEPT 2>/dev/null || \
 		iptables -I INPUT -m state --state NEW -m udp -p udp --dport ${udp_port} -j ACCEPT
 }
+Check_iptables_Rule(){
+    local table="$1" chain="$2" status
+    shift 2
+    if iptables -t "$table" -C "$chain" "$@" >/dev/null 2>&1; then
+        return 0
+    else
+        status=$?
+    fi
+    [[ "$status" -eq 1 ]] || return "$status"
+    # -C uses 1 for an absent rule. Confirm the table/chain is actually readable.
+    iptables -t "$table" -S "$chain" >/dev/null || return 2
+    return 1
+}
+Remove_iptables_Rule(){
+    local table="$1" chain="$2" status
+    shift 2
+    while true; do
+        if Check_iptables_Rule "$table" "$chain" "$@"; then
+            iptables -t "$table" -D "$chain" "$@" || return $?
+        else
+            status=$?
+            [[ "$status" -ne 1 ]] || return 0
+            return "$status"
+        fi
+    done
+}
 Del_iptables(){
-	local tcp_port="${1:-${tcp_port}}"
-	local udp_port="${2:-${udp_port}}"
-	iptables -D INPUT -m state --state NEW -m tcp -p tcp --dport ${tcp_port} -j ACCEPT 2>/dev/null
-	iptables -D INPUT -m state --state NEW -m udp -p udp --dport ${udp_port} -j ACCEPT 2>/dev/null
-	return 0
+    local tcp_port="${1:-${tcp_port:-}}" udp_port="${2:-${udp_port:-}}"
+    [[ "$tcp_port" =~ ^[0-9]+$ && "$udp_port" =~ ^[0-9]+$ ]] || return 1
+    Remove_iptables_Rule filter INPUT -m state --state NEW -m tcp -p tcp --dport "$tcp_port" -j ACCEPT || return 1
+    Remove_iptables_Rule filter INPUT -m state --state NEW -m udp -p udp --dport "$udp_port" -j ACCEPT
+}
+Remove_VPN_Forwarding_Rules(){
+    local vpn_network vpn_netmask vpn_subnet vpn_device forward_rules nat_rules interfaces egress
+    vpn_network=$(Get_Conf_Value ipv4-network) || return 1
+    vpn_netmask=$(Get_Conf_Value ipv4-netmask) || return 1
+    vpn_device=$(Get_Conf_Value device) || return 1
+    if [[ -z "$vpn_network" || -z "$vpn_device" ||
+        ( "$vpn_network" != */* && -z "$vpn_netmask" ) ]]; then
+        echo -e "${Error} 配置中缺少 VPN IPv4 网段、掩码或设备名称" >&2
+        return 1
+    fi
+    vpn_subnet="$vpn_network"
+    [[ "$vpn_subnet" == */* ]] || vpn_subnet="$vpn_network/$vpn_netmask"
+    # Recover installed egress interfaces even if the default route has changed.
+    forward_rules=$(iptables -t filter -S FORWARD) || return 1
+    nat_rules=$(iptables -t nat -S POSTROUTING) || return 1
+    interfaces=$(awk -v tunnel="${vpn_device}+" '
+        {
+            gsub(/"([^"\\]|\\.)*"/, "\"\"")
+            for (i = 1; i < NF; i++)
+                if (($i == "-i" || $i == "-o") && $(i + 1) != tunnel && !seen[$(i + 1)]++)
+                    print $(i + 1)
+        }
+    ' <<< "$forward_rules"$'\n'"$nat_rules") || return 1
+    while IFS= read -r egress; do
+        [[ -n "$egress" ]] || continue
+        # Delete only complete rule specifications created for this configured VPN.
+        Remove_iptables_Rule nat POSTROUTING -s "$vpn_subnet" -o "$egress" -j MASQUERADE || return 1
+        Remove_iptables_Rule filter FORWARD -i "${vpn_device}+" -s "$vpn_subnet" -o "$egress" \
+            -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT || return 1
+        Remove_iptables_Rule filter FORWARD -i "$egress" -o "${vpn_device}+" -d "$vpn_subnet" \
+            -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT || return 1
+    done <<< "$interfaces"
+    return 0
 }
 Save_iptables(){
 	iptables-save > /etc/iptables.up.rules

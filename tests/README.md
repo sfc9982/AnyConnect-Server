@@ -87,6 +87,7 @@ signature and TLS verification stay enabled.
 | Deletion retry | A deliberate CRL-generation failure is reported and preserves the live CRL; retrying deletion revokes the certificate, and repeated deletion succeeds |
 | Concurrent mutations | Contending account creation has one consistent winner; restore/delete ordering cannot escape permanent revocation; concurrent CRL publication retains all revocations |
 | Server control paths | Revocation works with a custom `pid-file` and a separate custom `occtl-socket-file`; missing cookie-invalidation capability is rejected before account changes |
+| Uninstall | The normal uninstall stops the real daemon and removes VPN INPUT/FORWARD/NAT rules after the default route disappears; unrelated rules and their saved/reloaded state survive, and repeated cleanup succeeds |
 | Failure controls | Target access fails before connection, after disconnect, and when tunnel forwarding is deliberately blocked; every negative login is followed by a valid control login |
 
 The target has no route back to the VPN address pool and is never connected

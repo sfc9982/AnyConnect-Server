@@ -98,6 +98,15 @@ EOF
     firewall)
         printf 'net.ipv4.ip_forward=0\n' > /etc/sysctl.conf || exit 1
         iptables -P FORWARD DROP || exit 1
+        # These administrator-owned rules must survive the full uninstall.
+        iptables -A INPUT -p tcp --dport 4444 -m comment --comment unrelated-input -j ACCEPT || exit 1
+        iptables -A FORWARD -i vpns+ -s 203.0.113.0/24 -o ve -m conntrack --ctstate NEW,ESTABLISHED,RELATED \
+            -m comment --comment unrelated-forward -j ACCEPT || exit 1
+        iptables -A FORWARD -i ve -o vpns+ -d 203.0.113.0/24 -m conntrack --ctstate ESTABLISHED,RELATED \
+            -m comment --comment unrelated-return -j ACCEPT || exit 1
+        iptables -t nat -A POSTROUTING -s 203.0.113.0/24 -o ve \
+            -m comment --comment unrelated-nat -j MASQUERADE || exit 1
+        iptables-save > "$state_dir/firewall-before-vpn.rules" || exit 1
         Set_iptables || fail 'firewall configuration failed'
         Set_iptables || fail 'repeated firewall configuration failed'
         Add_iptables 4443 4443 || fail 'service port rules failed'
@@ -230,6 +239,34 @@ EOF
         [[ -f "$state_dir/legacy-help-injected" ]] || fail 'legacy deletion failed before checking server capabilities'
         [[ "$before" == "$(sha256sum "$passwd_file" "$CRL_PEM" "$USERS_DIR/e2e-susp-user/e2e-susp-user.cer")" ]] ||
             fail 'unsupported session revocation mutated credentials'
+        ;;
+    uninstall)
+        cp "$conf" "$state_dir/uninstall.conf" || exit 1
+        # Cleanup must discover the installed egress even after the default route disappears.
+        ip route del default || exit 1
+        Uninstall_ocserv <<< 'y' || fail 'full uninstall failed'
+        [[ ! -e "$file" && ! -e "$conf_file" ]] || fail 'uninstall left the server or configuration installed'
+        normalize_rules() {
+            sed -E '/^#/d; s/\[[0-9]+:[0-9]+\]/[0:0]/g' "$1"
+        }
+        normalize_rules "$state_dir/firewall-before-vpn.rules" > "$state_dir/firewall-expected.rules" || exit 1
+        iptables-save > "$state_dir/firewall-after-uninstall.rules" || exit 1
+        normalize_rules "$state_dir/firewall-after-uninstall.rules" > "$state_dir/firewall-actual.rules" || exit 1
+        cmp -s "$state_dir/firewall-expected.rules" "$state_dir/firewall-actual.rules" ||
+            fail 'uninstall left VPN rules or changed unrelated firewall rules'
+        # Repeating cleanup with the saved configuration must accept absent rules.
+        conf="$state_dir/uninstall.conf"
+        Remove_VPN_Forwarding_Rules || fail 'repeated forwarding cleanup failed'
+        Del_iptables 4443 4443 || fail 'repeated port cleanup failed'
+        iptables-save > "$state_dir/firewall-after-repeat.rules" || exit 1
+        normalize_rules "$state_dir/firewall-after-repeat.rules" > "$state_dir/firewall-actual.rules" || exit 1
+        cmp -s "$state_dir/firewall-expected.rules" "$state_dir/firewall-actual.rules" ||
+            fail 'repeated cleanup changed unrelated firewall rules'
+        iptables-restore < /etc/iptables.up.rules || fail 'saved uninstall firewall could not be restored'
+        iptables-save > "$state_dir/firewall-after-restore.rules" || exit 1
+        normalize_rules "$state_dir/firewall-after-restore.rules" > "$state_dir/firewall-actual.rules" || exit 1
+        cmp -s "$state_dir/firewall-expected.rules" "$state_dir/firewall-actual.rules" ||
+            fail 'saved firewall restored VPN rules or lost unrelated rules'
         ;;
     *) fail "unknown action: $action" ;;
 esac
