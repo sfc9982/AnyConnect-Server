@@ -293,7 +293,7 @@ Installation_dependency(){
         apt-get)
             export DEBIAN_FRONTEND=noninteractive
             apt-get update || return 1
-            apt-get install -y util-linux tar xz-utils meson ninja-build protobuf-c-compiler vim net-tools pkg-config build-essential ca-certificates wget iproute2 procps iptables openssl libgnutls28-dev libwrap0-dev liblz4-dev libseccomp-dev libreadline-dev libnl-nf-3-dev libev-dev gnutls-bin ipcalc
+            apt-get install -y util-linux diffutils tar xz-utils meson ninja-build protobuf-c-compiler vim net-tools pkg-config build-essential ca-certificates wget iproute2 procps iptables openssl libgnutls28-dev libwrap0-dev liblz4-dev libseccomp-dev libreadline-dev libnl-nf-3-dev libev-dev gnutls-bin ipcalc
             ;;
         dnf)
             # RHEL derivatives (CentOS/Rocky/Alma/OpenEuler...) get extra deps from EPEL
@@ -308,18 +308,18 @@ Installation_dependency(){
                     dnf config-manager --set-enabled crb || return 1
                     ;;
             esac
-            dnf install -y util-linux tar xz meson ninja-build protobuf-c-compiler vim net-tools pkgconf-pkg-config gcc make ca-certificates wget iproute procps-ng iptables openssl gnutls-devel libseccomp-devel libev-devel libnl3-devel readline-devel lz4-devel gnutls-utils ipcalc
+            dnf install -y util-linux diffutils tar xz meson ninja-build protobuf-c-compiler vim net-tools pkgconf-pkg-config gcc make ca-certificates wget iproute procps-ng iptables openssl gnutls-devel libseccomp-devel libev-devel libnl3-devel readline-devel lz4-devel gnutls-utils ipcalc
             ;;
         yum)
             yum install -y epel-release >/dev/null 2>&1
-            yum install -y util-linux tar xz meson ninja-build protobuf-c-compiler vim net-tools pkgconfig gcc make ca-certificates wget iproute procps-ng iptables openssl gnutls-devel libseccomp-devel libev-devel libnl3-devel readline-devel lz4-devel gnutls-utils ipcalc
+            yum install -y util-linux diffutils tar xz meson ninja-build protobuf-c-compiler vim net-tools pkgconfig gcc make ca-certificates wget iproute procps-ng iptables openssl gnutls-devel libseccomp-devel libev-devel libnl3-devel readline-devel lz4-devel gnutls-utils ipcalc
             ;;
         pacman)
-            pacman -Syu --noconfirm util-linux tar xz meson ninja protobuf-c base-devel vim net-tools gnutls libseccomp libev libnl readline ca-certificates wget iproute2 procps-ng iptables openssl lz4 ipcalc
+            pacman -Syu --noconfirm util-linux diffutils tar xz meson ninja protobuf-c base-devel vim net-tools gnutls libseccomp libev libnl readline ca-certificates wget iproute2 procps-ng iptables openssl lz4 ipcalc
             ;;
         zypper)
             # Minimal SUSE images need the nobody user and daemon group used by ocserv.conf.
-            zypper -n install system-user-nobody system-user-daemon util-linux tar xz meson ninja libprotobuf-c-devel gnutls gcc make vim net-tools pkg-config gnutls-devel libseccomp-devel libev-devel libnl3-devel readline-devel liblz4-devel ca-certificates wget iproute2 procps iptables openssl ipcalc
+            zypper -n install system-user-nobody system-user-daemon util-linux diffutils tar xz meson ninja libprotobuf-c-devel gnutls gcc make vim net-tools pkg-config gnutls-devel libseccomp-devel libev-devel libnl3-devel readline-devel liblz4-devel ca-certificates wget iproute2 procps iptables openssl ipcalc
             ;;
         *)
             echo -e "${Error} Unknown package manager, cannot install dependencies !" && exit 1 ;;

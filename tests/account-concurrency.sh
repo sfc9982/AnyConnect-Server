@@ -70,7 +70,7 @@ if (( worker_mode )); then
     exit "$result"
 fi
 
-for executable in certtool ocpasswd openssl flock python3 timeout; do
+for executable in certtool ocpasswd openssl flock cmp python3 timeout; do
     command -v "$executable" >/dev/null || { echo "Missing test tool: $executable" >&2; exit 1; }
 done
 test_root=$(mktemp -d /tmp/ocserv-concurrency.XXXXXX)
