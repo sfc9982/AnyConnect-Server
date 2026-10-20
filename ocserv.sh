@@ -94,7 +94,7 @@ Download_ocserv(){
 	build_dir="/tmp/ocserv-build"
 	rm -rf "${build_dir}"
 	mkdir -p "${build_dir}" || return 1
-	wget -O "${build_dir}/ocserv-${ocserv_ver}.tar.xz" "https://ftp.infradead.org/pub/ocserv/ocserv-${ocserv_ver}.tar.xz" || return 1
+	wget -O "${build_dir}/ocserv-${ocserv_ver}.tar.xz" "https://www.infradead.org/ocserv/download/ocserv-${ocserv_ver}.tar.xz" || return 1
 	[[ ! -s "${build_dir}/ocserv-${ocserv_ver}.tar.xz" ]] && echo -e "${Error} ocserv 源码文件下载失败 !" && rm -rf "${build_dir}" && exit 1
 	tar -xJf "${build_dir}/ocserv-${ocserv_ver}.tar.xz" -C "${build_dir}" || return 1
 	cd "${build_dir}/ocserv-${ocserv_ver}" || return 1

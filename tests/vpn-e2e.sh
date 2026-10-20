@@ -216,68 +216,67 @@ check_traffic() {
     echo "PASS: $script $label (lease, routes, 256 KiB HTTP, NAT, UDP/TCP DNS, no bypass)"
 }
 
-for script in "$installer"; do
-    echo "::group::Real VPN: $script"
-    state_dir="$state_root/$script"
-    log_dir="$log_root/$script"
-    mkdir -p "$state_dir" "$log_dir"
-    password="E2e-$(openssl rand -hex 16)"
-    control_password="Control-$(openssl rand -hex 16)"
-    printf 'e2e-susp-user\n%s\n' "$password" > "$state_dir/account.input"
-    printf 'e2e-control\n%s\n' "$control_password" > "$state_dir/control.input"
-    # These are exclusively disposable test-container paths, never a host install.
-    rm -rf /etc/ocserv /tmp/ssl
-    rm -f /var/run/ocserv.pid /var/run/ocserv-socket* /var/run/occtl.socket
-    server_action configure > "$log_dir/configure.log" 2>&1
-    server_action add > "$log_dir/accounts.log" 2>&1
-    server_action duplicate >> "$log_dir/accounts.log" 2>&1
-    openssl pkcs12 -in "$state_dir/client.p12" -passin "pass:$password" -noout
-    server_action firewall > "$log_dir/firewall.log" 2>&1
-    target_unreachable
-    ip netns exec "$server_ns" /usr/local/sbin/ocserv --foreground --debug 2 \
-        --config /etc/ocserv/ocserv.conf > "$log_dir/server.log" 2>&1 &
-    server_pid=$!
-    for ((i=0; i<100; i++)); do
-        ip netns exec "$server_ns" ss -ltn | grep -q '192.0.2.1:4443' && break
-        kill -0 "$server_pid" 2>/dev/null || fail 'ocserv exited during startup'
-        sleep 0.1
-    done
-    ip netns exec "$server_ns" ss -ltn | grep -q '192.0.2.1:4443' || fail 'server not listening'
-    auth_result allow password e2e-control "$control_password" initial-control
-    auth_result deny password e2e-susp-user wrong-password bad-password
-    auth_result deny password missing-user wrong-password unknown-user
-
-    connect_client password tls password-tls
-    check_traffic tls password-tls
-    stop_client
-    target_unreachable
-    connect_client certificate dtls certificate-dtls
-    check_traffic dtls certificate-dtls
-    server_action toggle > "$log_dir/disable.log" 2>&1
-    # Revocation changes are reloaded in the running server, not hidden by a restart.
-    sleep 1
-    target_unreachable
-    stop_client
-    auth_result deny password e2e-susp-user "$password" disabled-password
-    auth_result deny certificate e2e-susp-user '' disabled-certificate
-
-    server_action toggle > "$log_dir/restore.log" 2>&1
-    sleep 1
-    connect_client p12 tls restored-p12
-    check_traffic tls restored-p12
-    auth_result allow password e2e-susp-user "$password" restored-password
-    server_action delete > "$log_dir/delete.log" 2>&1
-    sleep 1
-    target_unreachable
-    stop_client
-    auth_result deny password e2e-susp-user "$password" deleted-password
-    auth_result deny certificate e2e-susp-user '' revoked-certificate
-    target_unreachable
-
-    kill -TERM "$server_pid"
-    wait "$server_pid" || true
-    server_pid=''
-    echo "PASS: $script real VPN and account lifecycle"
-    echo '::endgroup::'
+script="$installer"
+echo "::group::Real VPN: $script"
+state_dir="$state_root/$script"
+log_dir="$log_root/$script"
+mkdir -p "$state_dir" "$log_dir"
+password="E2e-$(openssl rand -hex 16)"
+control_password="Control-$(openssl rand -hex 16)"
+printf 'e2e-susp-user\n%s\n' "$password" > "$state_dir/account.input"
+printf 'e2e-control\n%s\n' "$control_password" > "$state_dir/control.input"
+# These are exclusively disposable test-container paths, never a host install.
+rm -rf /etc/ocserv /tmp/ssl
+rm -f /var/run/ocserv.pid /var/run/ocserv-socket* /var/run/occtl.socket
+server_action configure > "$log_dir/configure.log" 2>&1
+server_action add > "$log_dir/accounts.log" 2>&1
+server_action duplicate >> "$log_dir/accounts.log" 2>&1
+openssl pkcs12 -in "$state_dir/client.p12" -passin "pass:$password" -noout
+server_action firewall > "$log_dir/firewall.log" 2>&1
+target_unreachable
+ip netns exec "$server_ns" /usr/local/sbin/ocserv --foreground --debug 2 \
+    --config /etc/ocserv/ocserv.conf > "$log_dir/server.log" 2>&1 &
+server_pid=$!
+for ((i=0; i<100; i++)); do
+    ip netns exec "$server_ns" ss -ltn | grep -q '192.0.2.1:4443' && break
+    kill -0 "$server_pid" 2>/dev/null || fail 'ocserv exited during startup'
+    sleep 0.1
 done
+ip netns exec "$server_ns" ss -ltn | grep -q '192.0.2.1:4443' || fail 'server not listening'
+auth_result allow password e2e-control "$control_password" initial-control
+auth_result deny password e2e-susp-user wrong-password bad-password
+auth_result deny password missing-user wrong-password unknown-user
+
+connect_client password tls password-tls
+check_traffic tls password-tls
+stop_client
+target_unreachable
+connect_client certificate dtls certificate-dtls
+check_traffic dtls certificate-dtls
+server_action toggle > "$log_dir/disable.log" 2>&1
+# Revocation changes are reloaded in the running server, not hidden by a restart.
+sleep 1
+target_unreachable
+stop_client
+auth_result deny password e2e-susp-user "$password" disabled-password
+auth_result deny certificate e2e-susp-user '' disabled-certificate
+
+server_action toggle > "$log_dir/restore.log" 2>&1
+sleep 1
+connect_client p12 tls restored-p12
+check_traffic tls restored-p12
+auth_result allow password e2e-susp-user "$password" restored-password
+server_action delete > "$log_dir/delete.log" 2>&1
+sleep 1
+target_unreachable
+stop_client
+auth_result deny password e2e-susp-user "$password" deleted-password
+auth_result deny certificate e2e-susp-user '' revoked-certificate
+target_unreachable
+
+kill -TERM "$server_pid"
+wait "$server_pid" || true
+server_pid=''
+echo "PASS: $script real VPN and account lifecycle"
+echo '::endgroup::'
 echo 'PASS: all real VPN end-to-end checks'

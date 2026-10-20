@@ -42,6 +42,15 @@ installer language performs its own dependency installation and source build,
 then runs the complete connection and account lifecycle checks. No production
 credentials or external VPN server are required.
 
+Legacy fixture preparation is confined to the disposable test container. Debian
+11 security packages use Debian's signed archive because the regular mirror's
+indexes reference removed packages. The Leap 15.6 image's ncurses runtime
+`6.1-150000.5.33.1` is aligned with the development package available in its signed
+`repo-sle-update` repository. This older test dependency does not retain the
+newer runtime's security fixes; the workaround is guarded by that exact image
+package version and is not part of either production installer. Repository
+signature and TLS verification stay enabled.
+
 ## What must pass
 
 | Area | Assertion |

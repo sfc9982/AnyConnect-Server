@@ -34,7 +34,7 @@ EOF
         Configure_Auth || fail 'authentication configuration failed'
         Configure_Auth || fail 'repeated authentication configuration failed'
         for key in auth enable-auth ca-cert crl cert-user-oid; do
-            [[ "$(grep -Ec "^[[:space:]]*$key[[:space:]]*=" "$conf")" -eq 1 ]] ||
+            [[ "$(grep -Ec "^[[:space:]]*${key}[[:space:]]*=" "$conf")" -eq 1 ]] ||
                 fail "duplicate $key configuration"
         done
         # Keep production routes, auth, TLS policy and VPN address pool. Only fixture
