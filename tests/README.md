@@ -67,6 +67,7 @@ signature and TLS verification stay enabled.
 | DNS | Advertised resolver answers over UDP and TCP; the client's normal resolver also supports a hostname-based download |
 | Disable and restore | Disable terminates the active tunnel and rejects fresh password/certificate logins; restore reconnects with the original exported PKCS#12 bundle |
 | Delete and revoke | Delete terminates the active tunnel; the saved client certificate and password no longer authenticate |
+| Session cookies | A saved cookie first reconnects and transfers real data; after disable/delete it cannot create a tunnel, even when it belonged to a separate detached session |
 | Account identity | A username containing `-susp-` survives the complete lifecycle; duplicate creation cannot overwrite existing credentials |
 | Failure controls | Target access fails before connection, after disconnect, and when tunnel forwarding is deliberately blocked; every negative login is followed by a valid control login |
 
@@ -85,12 +86,13 @@ methods, VPN pool, and split-route list remain in use.
 CI uploads diagnostic logs for seven days, including on failures. Temporary
 password files, CA/private keys, exported bundles, and client state are outside
 the uploaded log directory and are removed when the test exits. Authentication
-cookies are never printed or uploaded. Timeouts fail the suite and cannot count
+cookies are captured only in private temporary state, never printed in CI logs
+or uploaded. Timeouts fail the suite and cannot count
 as successful credential rejection.
 
 The jobs use each distro's userspace on the GitHub runner's Linux kernel. They
-validate fresh authentication, live-session termination, and IPv4 data flow with
-OpenConnect. They do not certify every Cisco Secure Client version, desktop or
+validate fresh authentication, live-session termination, saved-cookie invalidation,
+and IPv4 data flow with OpenConnect. They do not certify every Cisco Secure Client version, desktop or
 mobile certificate-import UI, IPv6, throughput under load, reboot/systemd
 persistence, cloud security groups, or a particular VPS/network path. Historical
 distro images may also fail installation if their upstream repositories retire;

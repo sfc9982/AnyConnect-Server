@@ -8,7 +8,7 @@ conf_file="/etc/ocserv"
 conf="/etc/ocserv/ocserv.conf"
 passwd_file="/etc/ocserv/ocpasswd"
 log_file="/tmp/ocserv.log"
-ocserv_ver="1.3.0"
+ocserv_ver="1.5.0"
 PID_FILE="/var/run/ocserv.pid"
 
 # PKI files and directories
@@ -101,9 +101,9 @@ Download_ocserv(){
     [[ ! -s "${build_dir}/ocserv-${ocserv_ver}.tar.xz" ]] && echo -e "${Error} ocserv source download failed!" && rm -rf "${build_dir}" && exit 1
     tar -xJf "${build_dir}/ocserv-${ocserv_ver}.tar.xz" -C "${build_dir}" || return 1
     cd "${build_dir}/ocserv-${ocserv_ver}" || return 1
-    ./configure || return 1
-    make || return 1
-    make install || return 1
+    meson setup build --prefix=/usr/local --sysconfdir=/etc -Dfirewall-script=iptables || return 1
+    ninja -C build || return 1
+    ninja -C build install || return 1
     cd / || return 1
     rm -rf "${build_dir}"
     
@@ -114,6 +114,7 @@ Download_ocserv(){
     else
         echo -e "${Error} ocserv compiled failed!" && exit 1
     fi
+    return 0
 }
 # Whether systemd is available for service management (default on mainstream distros)
 have_systemd(){
@@ -236,7 +237,7 @@ Installation_dependency(){
         apt-get)
             export DEBIAN_FRONTEND=noninteractive
             apt-get update || return 1
-            apt-get install -y tar xz-utils vim net-tools pkg-config build-essential ca-certificates wget iproute2 procps iptables openssl libgnutls28-dev libwrap0-dev liblz4-dev libseccomp-dev libreadline-dev libnl-nf-3-dev libev-dev gnutls-bin ipcalc
+            apt-get install -y tar xz-utils meson ninja-build protobuf-c-compiler vim net-tools pkg-config build-essential ca-certificates wget iproute2 procps iptables openssl libgnutls28-dev libwrap0-dev liblz4-dev libseccomp-dev libreadline-dev libnl-nf-3-dev libev-dev gnutls-bin ipcalc
             ;;
         dnf)
             # RHEL derivatives (CentOS/Rocky/Alma/OpenEuler...) get extra deps from EPEL
@@ -251,17 +252,17 @@ Installation_dependency(){
                     dnf config-manager --set-enabled crb || return 1
                     ;;
             esac
-            dnf install -y tar xz vim net-tools pkgconf-pkg-config gcc make ca-certificates wget iproute procps-ng iptables openssl gnutls-devel libseccomp-devel libev-devel libnl3-devel readline-devel lz4-devel gnutls-utils ipcalc
+            dnf install -y tar xz meson ninja-build protobuf-c-compiler vim net-tools pkgconf-pkg-config gcc make ca-certificates wget iproute procps-ng iptables openssl gnutls-devel libseccomp-devel libev-devel libnl3-devel readline-devel lz4-devel gnutls-utils ipcalc
             ;;
         yum)
             yum install -y epel-release >/dev/null 2>&1
-            yum install -y tar xz vim net-tools pkgconfig gcc make ca-certificates wget iproute procps-ng iptables openssl gnutls-devel libseccomp-devel libev-devel libnl3-devel readline-devel lz4-devel gnutls-utils ipcalc
+            yum install -y tar xz meson ninja-build protobuf-c-compiler vim net-tools pkgconfig gcc make ca-certificates wget iproute procps-ng iptables openssl gnutls-devel libseccomp-devel libev-devel libnl3-devel readline-devel lz4-devel gnutls-utils ipcalc
             ;;
         pacman)
-            pacman -Syu --noconfirm tar xz base-devel vim net-tools gnutls libseccomp libev libnl readline ca-certificates wget iproute2 procps-ng iptables openssl lz4 ipcalc
+            pacman -Syu --noconfirm tar xz meson ninja protobuf-c base-devel vim net-tools gnutls libseccomp libev libnl readline ca-certificates wget iproute2 procps-ng iptables openssl lz4 ipcalc
             ;;
         zypper)
-            zypper -n install tar xz gnutls gcc make vim net-tools pkg-config gnutls-devel libseccomp-devel libev-devel libnl3-devel readline-devel liblz4-devel ca-certificates wget iproute2 procps iptables openssl ipcalc
+            zypper -n install tar xz meson ninja libprotobuf-c-devel gnutls gcc make vim net-tools pkg-config gnutls-devel libseccomp-devel libev-devel libnl3-devel readline-devel liblz4-devel ca-certificates wget iproute2 procps iptables openssl ipcalc
             ;;
         *)
             echo -e "${Error} Unknown package manager, cannot install dependencies !" && exit 1 ;;
@@ -450,7 +451,7 @@ List_User(){
     done
 }
 Disconnect_User(){
-    local u="$1" server_pid socket output active
+    local u="$1" server_pid socket output active commands action="disconnect" sessions
     [[ -s "$PID_FILE" ]] || return 0
     server_pid=$(cat "$PID_FILE") || return 1
     [[ "$server_pid" =~ ^[1-9][0-9]*$ ]] || return 1
@@ -458,15 +459,27 @@ Disconnect_User(){
     socket=$(Get_Conf_Value occtl-socket-file) || return 1
     local args=(--no-pager)
     [[ -z "$socket" ]] || args+=(--socket-file "$socket")
-    if output=$(occtl "${args[@]}" -- disconnect user "$u" 2>&1); then
+    commands=$(occtl "${args[@]}" help) || return 1
+    if grep -qE '^[[:space:]]*terminate user[[:space:]]' <<< "$commands"; then
+        action="terminate"
+    else
+        echo -e "${Tip} This ocserv version can only disconnect; upgrade to 1.4.2 or later to invalidate session cookies too." >&2
+    fi
+    # occtl does not support a standalone --; it treats it as help and returns success.
+    if output=$(occtl "${args[@]}" "$action" user "$u" 2>&1); then
         return 0
     fi
-    # No active session is a successful no-op; control errors remain failures.
+    # No active or resumable session is a successful no-op; control errors remain failures.
     active=$(occtl "${args[@]}" show users) || { printf '%s\n' "$output" >&2; return 1; }
-    if awk -v u="$u" '$2 == u { found = 1 } END { exit !found }' <<< "$active"; then
+    if [[ "$action" == "terminate" ]]; then
+        sessions=$(occtl "${args[@]}" show sessions valid) || { printf '%s\n' "$output" >&2; return 1; }
+        active+=$'\n'"$sessions"
+    fi
+    if awk -v u="$u" '$1 != "id" && $1 != "session" && $2 == u { found = 1 } END { exit !found }' <<< "$active"; then
         printf '%s\n' "$output" >&2
         return 1
     fi
+    return 0
 }
 Add_User(){
     read -rp "Please input the username of VPN account

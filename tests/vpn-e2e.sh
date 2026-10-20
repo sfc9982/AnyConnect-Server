@@ -34,6 +34,21 @@ stop_client() {
         client_pid=''
     fi
 }
+detach_client() {
+    # SIGHUP restores local routes without logging off the server-side cookie.
+    # SIGINT/SIGTERM here could hide a failed server-side cookie invalidation.
+    [[ -n "$client_pid" ]] || return 0
+    kill -HUP "$client_pid" 2>/dev/null || true
+    for ((i=0; i<50; i++)); do
+        kill -0 "$client_pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    if kill -0 "$client_pid" 2>/dev/null; then
+        fail 'OpenConnect did not detach without logging off'
+    fi
+    wait "$client_pid" 2>/dev/null || true
+    client_pid=''
+}
 cleanup() {
     local status=$?
     trap - EXIT
@@ -49,7 +64,7 @@ cleanup() {
     rm -rf "/etc/netns/$client_ns"
     if ((status != 0)); then
         echo 'VPN E2E failed; final server/client log excerpts:' >&2
-        for log in "$log_root"/*/*.log; do
+        for log in "$log_root"/*.log "$log_root"/*/*.log; do
             [[ -f "$log" ]] || continue
             echo "--- $log ---" >&2
             tail -60 "$log" >&2
@@ -125,6 +140,7 @@ client_args() {
         password) connection+=(--passwd-on-stdin) ;;
         certificate) connection+=(--no-passwd --certificate "$state_dir/client.cer" --sslkey "$state_dir/client-key.pem") ;;
         p12) connection+=(--no-passwd --certificate "$state_dir/client.p12" --key-password "$password") ;;
+        cookie) connection+=(--no-passwd --cookie-on-stdin) ;;
         *) fail 'unknown authentication mode' ;;
     esac
 }
@@ -151,16 +167,20 @@ auth_result() {
     echo "PASS: $script $label"
 }
 connect_client() {
-    local mode="$1" transport="$2" label="$3"
+    local mode="$1" transport="$2" label="$3" secret="$password"
     stop_client
     VPNC_STATE_DIR="$state_dir/$label"
     export VPNC_STATE_DIR
     mkdir -p "$VPNC_STATE_DIR"
     client_args "$mode" e2e-susp-user
+    if [[ "$mode" == cookie ]]; then
+        [[ -s "${4:?saved cookie file required}" ]] || fail 'saved cookie is empty'
+        secret="$(cat "$4")"
+    fi
     [[ "$transport" == dtls ]] || connection+=(--no-dtls)
-    ip netns exec "$client_ns" "${connection[@]}" --interface vpntest \
+    ip netns exec "$client_ns" "${connection[@]}" --printcookie --interface vpntest \
         --script "bash $repo_dir/tests/vpn-vpnc.sh" https://192.0.2.1:4443/ \
-        <<< "$password" > "$log_dir/$label.log" 2>&1 &
+        <<< "$secret" > "$state_dir/$label.cookie" 2> "$log_dir/$label.log" &
     client_pid=$!
     for ((i=0; i<150; i++)); do
         [[ -f "$VPNC_STATE_DIR/connected" ]] && break
@@ -181,6 +201,29 @@ connect_client() {
         done
         grep -q 'Established DTLS connection' "$log_dir/$label.log" || fail 'DTLS silently fell back to TLS'
     fi
+}
+reject_saved_cookie() {
+    local cookie_file="$1" label="$2" status
+    [[ -s "$cookie_file" ]] || fail 'saved cookie is empty'
+    VPNC_STATE_DIR="$state_dir/$label"
+    export VPNC_STATE_DIR
+    mkdir -p "$VPNC_STATE_DIR"
+    client_args cookie e2e-susp-user
+    # Attempt the actual tunnel phase, with no fresh authentication fallback.
+    if ip netns exec "$client_ns" timeout --kill-after=3 15 "${connection[@]}" \
+        --no-dtls --interface vpntest --script "bash $repo_dir/tests/vpn-vpnc.sh" \
+        https://192.0.2.1:4443/ < "$cookie_file" > /dev/null 2> "$log_dir/$label.log"; then
+        status=0
+    else
+        status=$?
+    fi
+    [[ ! -e "$VPNC_STATE_DIR/address" ]] || fail "$label: revoked cookie established a tunnel"
+    [[ "$status" != 0 && "$status" != 124 && "$status" != 137 ]] ||
+        fail "$label: expected cookie rejection, got status $status"
+    grep -Fq 'Cookie was rejected by server; exiting.' "$log_dir/$label.log" ||
+        fail "$label: no explicit server cookie rejection"
+    auth_result allow password e2e-control "$control_password" "$label-control"
+    echo "PASS: $script $label (saved session cannot reconnect)"
 }
 check_traffic() {
     local transport="$1" label="$2" dns before after received
@@ -253,11 +296,23 @@ stop_client
 target_unreachable
 connect_client certificate dtls certificate-dtls
 check_traffic dtls certificate-dtls
+detach_client
+# Prove this cookie works before revocation, then leave it detached. A separate
+# fresh active session cannot log it off on our behalf when the server kicks it.
+connect_client cookie dtls certificate-cookie "$state_dir/certificate-dtls.cookie"
+check_traffic dtls certificate-cookie
+detach_client
+connect_client certificate dtls certificate-live
+check_traffic dtls certificate-live
 server_action toggle > "$log_dir/disable.log" 2>&1
 # Revocation changes are reloaded in the running server, not hidden by a restart.
 sleep 1
 target_unreachable
-stop_client
+detach_client
+[[ -s "$state_dir/certificate-live.cookie" ]] || fail 'active certificate cookie missing'
+! cmp -s "$state_dir/certificate-dtls.cookie" "$state_dir/certificate-live.cookie" ||
+    fail 'detached and active certificate sessions share a cookie'
+reject_saved_cookie "$state_dir/certificate-dtls.cookie" disabled-cookie
 auth_result deny password e2e-susp-user "$password" disabled-password
 auth_result deny certificate e2e-susp-user '' disabled-certificate
 
@@ -265,11 +320,21 @@ server_action toggle > "$log_dir/restore.log" 2>&1
 sleep 1
 connect_client p12 tls restored-p12
 check_traffic tls restored-p12
+detach_client
+connect_client cookie tls restored-cookie "$state_dir/restored-p12.cookie"
+check_traffic tls restored-cookie
+detach_client
+connect_client p12 tls restored-live
+check_traffic tls restored-live
 auth_result allow password e2e-susp-user "$password" restored-password
 server_action delete > "$log_dir/delete.log" 2>&1
 sleep 1
 target_unreachable
-stop_client
+detach_client
+[[ -s "$state_dir/restored-live.cookie" ]] || fail 'active restored cookie missing'
+! cmp -s "$state_dir/restored-p12.cookie" "$state_dir/restored-live.cookie" ||
+    fail 'detached and active restored sessions share a cookie'
+reject_saved_cookie "$state_dir/restored-p12.cookie" deleted-cookie
 auth_result deny password e2e-susp-user "$password" deleted-password
 auth_result deny certificate e2e-susp-user '' revoked-certificate
 target_unreachable

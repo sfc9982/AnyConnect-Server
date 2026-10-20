@@ -3,7 +3,8 @@
 set -euo pipefail
 
 : "${VPNC_REAL_SCRIPT:?}" "${VPNC_STATE_DIR:?}"
-"$VPNC_REAL_SCRIPT"
+# Keep OpenConnect's private cookie stdout separate from routing diagnostics.
+"$VPNC_REAL_SCRIPT" >&2
 case "${reason:-}" in
     connect|reconnect)
         printf '%s\n' "${INTERNAL_IP4_ADDRESS:-}" > "$VPNC_STATE_DIR/address"
