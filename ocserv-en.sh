@@ -2,7 +2,7 @@
 PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:~/bin
 export PATH
 
-sh_ver="2.1.0"
+sh_ver="2.2.0"
 file="/usr/local/sbin/ocserv"
 conf_file="/etc/ocserv"
 conf="/etc/ocserv/ocserv.conf"
@@ -10,6 +10,7 @@ passwd_file="/etc/ocserv/ocpasswd"
 log_file="/tmp/ocserv.log"
 ocserv_ver="1.5.0"
 PID_FILE="/var/run/ocserv.pid"
+SYSTEMD_UNIT_DIR="/etc/systemd/system"
 
 # PKI files and directories
 SSL_DIR="/etc/ocserv/ssl"
@@ -73,11 +74,52 @@ check_installed_status(){
     [[ ! -e ${conf} ]] && echo -e "${Error} ocserv config doesn't exist, please check it!" && [[ $1 != "un" ]] && exit 1
 }
 
+Configured_PID_File(){
+    local configured
+    configured=$(Get_Conf_Value pid-file) || return 2
+    configured="${configured:-$PID_FILE}"
+    if [[ "$configured" != /* || "$configured" == *$'\n'* || "$configured" == *$'\r'* ]]; then
+        echo -e "${Error} pid-file must be an absolute path without line breaks" >&2
+        return 2
+    fi
+    printf '%s\n' "$configured"
+}
+# 0: running ocserv; 1: absent/dead PID; 2: invalid configuration or lookup error.
+Get_Ocserv_PID(){
+    local pid_path candidate executable expected
+    pid_path=$(Configured_PID_File) || return 2
+    if [[ ! -e "$pid_path" ]]; then
+        [[ ! -L "$pid_path" ]] || return 2
+        return 1
+    fi
+    [[ -f "$pid_path" && -r "$pid_path" ]] || return 2
+    candidate=$(cat "$pid_path") || return 2
+    [[ "$candidate" =~ ^[1-9][0-9]*$ ]] || return 2
+    if ! kill -0 "$candidate" 2>/dev/null; then
+        [[ ! -d "/proc/$candidate" ]] || return 2
+        return 1
+    fi
+    executable=$(readlink "/proc/$candidate/exe") || {
+        ! kill -0 "$candidate" 2>/dev/null || return 2
+        return 1
+    }
+    expected=$(readlink -f "$file") || return 2
+    # A running daemon may still hold the previous binary after an upgrade.
+    executable="${executable% (deleted)}"
+    if [[ "$executable" != "$expected" ]]; then
+        echo -e "${Error} Refusing to signal PID $candidate: it is not $file" >&2
+        return 2
+    fi
+    printf '%s\n' "$candidate"
+}
 check_pid(){
-    if [[ ! -e ${PID_FILE} ]]; then
-        PID=""
+    local status
+    if PID=$(Get_Ocserv_PID); then
+        return 0
     else
-        PID=$(cat ${PID_FILE})
+        status=$?
+        PID=""
+        [[ "$status" -eq 1 ]]
     fi
 }
 
@@ -93,37 +135,57 @@ Get_ip(){
         fi
     fi
 }
-Download_ocserv(){
-    build_dir="/tmp/ocserv-build"
-    rm -rf "${build_dir}"
-    mkdir -p "${build_dir}" || return 1
-    wget -O "${build_dir}/ocserv-${ocserv_ver}.tar.xz" "https://www.infradead.org/ocserv/download/ocserv-${ocserv_ver}.tar.xz" || return 1
-    [[ ! -s "${build_dir}/ocserv-${ocserv_ver}.tar.xz" ]] && echo -e "${Error} ocserv source download failed!" && rm -rf "${build_dir}" && exit 1
-    tar -xJf "${build_dir}/ocserv-${ocserv_ver}.tar.xz" -C "${build_dir}" || return 1
-    cd "${build_dir}/ocserv-${ocserv_ver}" || return 1
+Download_ocserv() (
+    local build_dir config_next=""
+    build_dir=$(mktemp -d "${TMPDIR:-/tmp}/ocserv-build.XXXXXX") || return 1
+    trap 'rm -rf "$build_dir"; [[ -z "$config_next" ]] || rm -f "$config_next"' EXIT
+    # Fetch configuration before publishing binaries; preserve an existing config on retry.
+    if [[ ! -e "$conf" ]]; then
+        wget -O "$build_dir/ocserv.conf" "https://raw.githubusercontent.com/sfc9982/AnyConnect-Server/main/ocserv.conf" || return 1
+        [[ -s "$build_dir/ocserv.conf" ]] || return 1
+    else
+        [[ -f "$conf" && -s "$conf" ]] || return 1
+    fi
+    wget -O "$build_dir/ocserv-${ocserv_ver}.tar.xz" "https://www.infradead.org/ocserv/download/ocserv-${ocserv_ver}.tar.xz" || return 1
+    [[ -s "$build_dir/ocserv-${ocserv_ver}.tar.xz" ]] || return 1
+    tar -xJf "$build_dir/ocserv-${ocserv_ver}.tar.xz" -C "$build_dir" || return 1
+    cd "$build_dir/ocserv-${ocserv_ver}" || return 1
     meson setup build --prefix=/usr/local --sysconfdir=/etc -Dfirewall-script=iptables || return 1
     ninja -C build || return 1
-    ninja -C build install || return 1
-    cd / || return 1
-    rm -rf "${build_dir}"
-    
-    if [[ -e ${file} ]]; then
-        mkdir -p "${conf_file}" || return 1
-        wget -N -P "${conf_file}" "https://raw.githubusercontent.com/sfc9982/AnyConnect-Server/main/ocserv.conf" || return 1
-        [[ ! -s "${conf}" ]] && echo -e "${Error} ocserv config download failed!" && rm -rf "${conf_file}" && exit 1
-    else
-        echo -e "${Error} ocserv compiled failed!" && exit 1
+    mkdir -p "$conf_file" || return 1
+    if [[ ! -e "$conf" ]]; then
+        config_next=$(mktemp "$conf_file/.ocserv-conf.XXXXXX") || return 1
+        install -m 644 "$build_dir/ocserv.conf" "$config_next" || return 1
+        mv -f "$config_next" "$conf" || return 1
+        config_next=""
     fi
-    return 0
-}
+    ninja -C build install || return 1
+    [[ -x "$file" && -s "$conf" ]]
+)
 # Whether systemd is available for service management (default on mainstream distros)
 have_systemd(){
     command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]
 }
+Install_Systemd_Unit(){
+    local unit="$1" staged
+    staged=$(mktemp "$SYSTEMD_UNIT_DIR/.$unit.XXXXXX") || return 1
+    if ! cat > "$staged" || ! chmod 644 "$staged" ||
+        ! mv -f "$staged" "$SYSTEMD_UNIT_DIR/$unit"; then
+        rm -f "$staged"
+        return 1
+    fi
+    systemctl daemon-reload || return $?
+    systemctl enable "${unit%.service}" >/dev/null 2>&1
+}
 Service_ocserv(){
-    # Inline systemd unit files replace the third-party init.d download (no external supply chain)
+    local pid_path pid_option
     if have_systemd; then
-        cat > /etc/systemd/system/ocserv.service <<EOF
+        pid_path=$(Configured_PID_File) || return 1
+        pid_path="${pid_path//\\/\\\\}"
+        pid_path="${pid_path//%/%%}"
+        pid_option="${pid_path//\"/\\\"}"
+        pid_option="${pid_option//\$/\$\$}"
+        Install_Systemd_Unit ocserv.service <<EOF || return $?
 [Unit]
 Description=OpenConnect SSL VPN server (Cisco AnyConnect compatible)
 Documentation=https://ocserv.gitlab.io/www/
@@ -132,8 +194,8 @@ Wants=network-online.target
 
 [Service]
 Type=forking
-PIDFile=/var/run/ocserv.pid
-ExecStart=/usr/local/sbin/ocserv -c /etc/ocserv/ocserv.conf
+PIDFile=$pid_path
+ExecStart=/usr/local/sbin/ocserv -c /etc/ocserv/ocserv.conf --pid-file="$pid_option"
 ExecReload=/bin/kill -HUP \$MAINPID
 Restart=on-failure
 RestartSec=5
@@ -142,18 +204,14 @@ LimitNOFILE=65536
 [Install]
 WantedBy=multi-user.target
 EOF
-        systemctl daemon-reload
-        systemctl enable ocserv >/dev/null 2>&1
         echo -e "${Info} ocserv systemd service unit installed and enabled at boot!"
     else
-        # Minimal environments without systemd (Docker/OpenVZ): manage the daemon directly
         echo -e "${Tip} systemd not detected, ocserv will be managed as a plain daemon (no boot autostart)."
     fi
 }
 Firewall_Service_ocserv(){
-    # Boot-time iptables restore unit (replaces the Debian-only if-pre-up.d hook; distro-agnostic)
     have_systemd || return 0
-    cat > /etc/systemd/system/ocserv-firewall.service <<EOF
+    Install_Systemd_Unit ocserv-firewall.service <<EOF
 [Unit]
 Description=Restore ocserv iptables firewall rules
 After=network-online.target
@@ -167,8 +225,6 @@ ExecStart=/bin/sh -c 'iptables-restore < /etc/iptables.up.rules'
 [Install]
 WantedBy=multi-user.target
 EOF
-    systemctl daemon-reload
-    systemctl enable ocserv-firewall >/dev/null 2>&1
 }
 rand(){
     min=10000
@@ -237,7 +293,7 @@ Installation_dependency(){
         apt-get)
             export DEBIAN_FRONTEND=noninteractive
             apt-get update || return 1
-            apt-get install -y tar xz-utils meson ninja-build protobuf-c-compiler vim net-tools pkg-config build-essential ca-certificates wget iproute2 procps iptables openssl libgnutls28-dev libwrap0-dev liblz4-dev libseccomp-dev libreadline-dev libnl-nf-3-dev libev-dev gnutls-bin ipcalc
+            apt-get install -y util-linux tar xz-utils meson ninja-build protobuf-c-compiler vim net-tools pkg-config build-essential ca-certificates wget iproute2 procps iptables openssl libgnutls28-dev libwrap0-dev liblz4-dev libseccomp-dev libreadline-dev libnl-nf-3-dev libev-dev gnutls-bin ipcalc
             ;;
         dnf)
             # RHEL derivatives (CentOS/Rocky/Alma/OpenEuler...) get extra deps from EPEL
@@ -252,84 +308,187 @@ Installation_dependency(){
                     dnf config-manager --set-enabled crb || return 1
                     ;;
             esac
-            dnf install -y tar xz meson ninja-build protobuf-c-compiler vim net-tools pkgconf-pkg-config gcc make ca-certificates wget iproute procps-ng iptables openssl gnutls-devel libseccomp-devel libev-devel libnl3-devel readline-devel lz4-devel gnutls-utils ipcalc
+            dnf install -y util-linux tar xz meson ninja-build protobuf-c-compiler vim net-tools pkgconf-pkg-config gcc make ca-certificates wget iproute procps-ng iptables openssl gnutls-devel libseccomp-devel libev-devel libnl3-devel readline-devel lz4-devel gnutls-utils ipcalc
             ;;
         yum)
             yum install -y epel-release >/dev/null 2>&1
-            yum install -y tar xz meson ninja-build protobuf-c-compiler vim net-tools pkgconfig gcc make ca-certificates wget iproute procps-ng iptables openssl gnutls-devel libseccomp-devel libev-devel libnl3-devel readline-devel lz4-devel gnutls-utils ipcalc
+            yum install -y util-linux tar xz meson ninja-build protobuf-c-compiler vim net-tools pkgconfig gcc make ca-certificates wget iproute procps-ng iptables openssl gnutls-devel libseccomp-devel libev-devel libnl3-devel readline-devel lz4-devel gnutls-utils ipcalc
             ;;
         pacman)
-            pacman -Syu --noconfirm tar xz meson ninja protobuf-c base-devel vim net-tools gnutls libseccomp libev libnl readline ca-certificates wget iproute2 procps-ng iptables openssl lz4 ipcalc
+            pacman -Syu --noconfirm util-linux tar xz meson ninja protobuf-c base-devel vim net-tools gnutls libseccomp libev libnl readline ca-certificates wget iproute2 procps-ng iptables openssl lz4 ipcalc
             ;;
         zypper)
             # Minimal SUSE images need the nobody user and daemon group used by ocserv.conf.
-            zypper -n install system-user-nobody system-user-daemon tar xz meson ninja libprotobuf-c-devel gnutls gcc make vim net-tools pkg-config gnutls-devel libseccomp-devel libev-devel libnl3-devel readline-devel liblz4-devel ca-certificates wget iproute2 procps iptables openssl ipcalc
+            zypper -n install system-user-nobody system-user-daemon util-linux tar xz meson ninja libprotobuf-c-devel gnutls gcc make vim net-tools pkg-config gnutls-devel libseccomp-devel libev-devel libnl3-devel readline-devel liblz4-devel ca-certificates wget iproute2 procps iptables openssl ipcalc
             ;;
         *)
             echo -e "${Error} Unknown package manager, cannot install dependencies !" && exit 1 ;;
     esac
 }
-Install_ocserv(){
-    check_root || return 1
-    [[ -e ${file} ]] && echo -e "${Error} ocserv is already installed !" && exit 1
-    echo -e "${Info} Start to install/config dependencies..."
-    Installation_dependency || return 1
-    echo -e "${Info} Start to download/install config file..."
-    Download_ocserv || return 1
-    echo -e "${Info} Start to install systemd service units..."
-    Service_ocserv || return 1
-    echo -e "${Info} Start to self-sign SSL cert..."
-    Generate_SSL || return 1
-    echo -e "${Info} Enforcing CRL and certificate-default + password-fallback auth..."
-    Ensure_CRL || return 1
-    Configure_Auth || return 1
-    echo -e "${Info} Start to set account settings..."
-    Read_config || return 1
-    Set_Config || return 1
-    echo -e "${Info} Start to set iptables firewall ..."
-    Set_iptables || return 1
-    echo -e "${Info} Start to add iptables firewall rules..."
-    Add_iptables "${set_tcp_port}" "${set_udp_port}" || return 1
-    echo -e "${Info} Start to save iptables firewall rules..."
-    Save_iptables || return 1
-    echo -e "${Info} All progress installed completed, now starting..."
-    Start_ocserv
+Install_Step(){
+    local step="$1"
+    shift
+    [[ ! -f "$install_state/$step.done" ]] || return 0
+    "$@" || return $?
+    : > "$install_state/$step.done"
 }
+Install_SSL_Material(){
+    local staged="$install_state/ssl" item destination mode pending
+    if [[ ! -f "$install_state/ssl-generated.done" ]]; then
+        (
+            SSL_DIR="$staged"
+            CA_CERT="$SSL_DIR/ca-cert.pem"
+            CA_KEY="$SSL_DIR/ca-key.pem"
+            Generate_SSL
+        ) || return 1
+        : > "$install_state/ssl-generated.done" || return 1
+    fi
+    mkdir -p "$SSL_DIR" || return 1
+    for item in ca-cert.pem ca-key.pem server-cert.pem server-key.pem; do
+        case "$item" in
+            ca-cert.pem) destination="$CA_CERT"; mode=644 ;;
+            ca-key.pem) destination="$CA_KEY"; mode=600 ;;
+            *-cert.pem) destination="$SSL_DIR/$item"; mode=644 ;;
+            *) destination="$SSL_DIR/$item"; mode=600 ;;
+        esac
+        [[ -s "$staged/$item" ]] || return 1
+        if [[ -e "$destination" || -L "$destination" ]]; then
+            # Never replace identity material published by an earlier attempt.
+            cmp -s "$staged/$item" "$destination" || return 1
+        else
+            pending=$(mktemp "$destination.install.XXXXXX") || return 1
+            if ! install -m "$mode" "$staged/$item" "$pending" ||
+                ! mv -f "$pending" "$destination"; then
+                rm -f "$pending"
+                return 1
+            fi
+        fi
+    done
+}
+Install_Initial_Account(){
+    local candidate u
+    # An account may have completed immediately before its progress stamp failed.
+    for candidate in "$USERS_DIR"/*; do
+        [[ -d "$candidate" ]] || continue
+        u="${candidate##*/}"
+        [[ -s "$candidate/$u.cer" && -s "$candidate/$u-key.pem" &&
+            -s "$candidate/$u.p12" ]] && pw_user_exists "$u" || return 1
+        return 0
+    done
+    Add_User
+}
+Install_Ports(){
+    Set_tcp_port || return 1
+    Set_udp_port || return 1
+    Set_Conf_Value tcp-port "$set_tcp_port" || return 1
+    Set_Conf_Value udp-port "$set_udp_port"
+}
+Install_ocserv() (
+    check_root || return 1
+    local install_state="$conf_file/.install-state"
+    if [[ ! -d "$install_state" ]]; then
+        # A completed or pre-existing installation never enters the resume path.
+        if [[ -e "$file" || -e "$CA_CERT" || -e "$CA_KEY" ||
+            -e "$passwd_file" || -e "$SSL_DIR/server-key.pem" ]]; then
+            echo -e "${Error} Existing ocserv installation or credentials; refusing to initialize them again" >&2
+            return 1
+        fi
+        mkdir -p "$conf_file" || return 1
+        (umask 077; mkdir "$install_state") || return 1
+    fi
+    [[ ! -L "$install_state" ]] || return 1
+    echo -e "${Info} Installing or resuming ocserv; completed credentials and configuration are preserved"
+    # This phase also installs flock before it is needed for the remaining phases.
+    Install_Step dependencies Installation_dependency || return 1
+    exec 9> "$install_state/lock" || return 1
+    flock -n 9 || { echo -e "${Error} Another installation is in progress" >&2; return 1; }
+    Install_Step download Download_ocserv || return 1
+    Install_Step service Service_ocserv || return 1
+    Install_Step ssl Install_SSL_Material || return 1
+    Install_Step crl Ensure_CRL || return 1
+    Install_Step auth Configure_Auth || return 1
+    Read_config || return 1
+    Install_Step account Install_Initial_Account || return 1
+    Install_Step ports Install_Ports || return 1
+    set_tcp_port=$(Get_Conf_Value tcp-port) || return 1
+    set_udp_port=$(Get_Conf_Value udp-port) || return 1
+    [[ "$set_tcp_port" =~ ^[0-9]+$ && "$set_udp_port" =~ ^[0-9]+$ ]] || return 1
+    Install_Step firewall Set_iptables || return 1
+    Install_Step ports-firewall Add_iptables "$set_tcp_port" "$set_udp_port" || return 1
+    Install_Step save-firewall Save_iptables || return 1
+    check_pid || return 1
+    if [[ -n "$PID" ]]; then
+        if have_systemd; then
+            systemctl is-active --quiet ocserv || return 1
+        fi
+        View_Config || return 1
+    else
+        # The daemon must not inherit the installation lock.
+        Start_ocserv 9>&- || return $?
+    fi
+    rm -rf -- "$install_state"
+)
 Start_ocserv(){
     check_installed_status
-    check_pid
-    [[ ! -z ${PID} ]] && echo -e "${Error} ocserv is running !" && exit 1
+    local pid_path
+    check_pid || return 1
+    if [[ -n "$PID" ]]; then
+        echo -e "${Error} ocserv is already running" >&2
+        return 1
+    fi
+    pid_path=$(Configured_PID_File) || return 1
     if have_systemd; then
-        systemctl start ocserv
+        systemctl start ocserv || return $?
     else
-        ${file} -c ${conf}
+        "$file" -c "$conf" --pid-file="$pid_path" || return $?
     fi
     sleep 2s
-    check_pid
-    [[ ! -z ${PID} ]] && View_Config
+    check_pid || return 1
+    if [[ -z "$PID" ]]; then
+        echo -e "${Error} ocserv exited before startup completed" >&2
+        return 1
+    fi
+    View_Config
+}
+Wait_For_Ocserv_Stop(){
+    local attempt
+    for attempt in {1..50}; do
+        check_pid || return 1
+        [[ -n "$PID" ]] || return 0
+        sleep 0.1
+    done
+    echo -e "${Error} ocserv did not stop" >&2
+    return 1
 }
 Stop_ocserv(){
     check_installed_status
-    check_pid
-    [[ -z ${PID} ]] && echo -e "${Error} ocserv is NOT running !" && exit 1
-    if have_systemd; then
-        systemctl stop ocserv
-    else
-        [[ ! -z ${PID} ]] && kill ${PID}
+    check_pid || return 1
+    if [[ -z "$PID" ]]; then
+        echo -e "${Error} ocserv is not running" >&2
+        return 1
     fi
+    if have_systemd; then
+        systemctl stop ocserv || return $?
+    else
+        kill "$PID" || return $?
+    fi
+    Wait_For_Ocserv_Stop
 }
 Restart_ocserv(){
     check_installed_status
     if have_systemd; then
-        systemctl restart ocserv
+        systemctl restart ocserv || return $?
+        sleep 2s
+        check_pid || return 1
+        [[ -n "$PID" ]] || return 1
+        View_Config
     else
-        check_pid
-        [[ ! -z ${PID} ]] && kill ${PID}
-        ${file} -c ${conf}
+        check_pid || return 1
+        if [[ -n "$PID" ]]; then
+            Stop_ocserv || return $?
+        fi
+        Start_ocserv
     fi
-    sleep 2s
-    check_pid
-    [[ ! -z ${PID} ]] && View_Config
 }
 Set_ocserv(){
     [[ ! -e ${conf} ]] && echo -e "${Error} ocserv config file doesn't exist !" && exit 1
@@ -423,159 +582,237 @@ Read_config(){
     max_same_clients=$(echo -e "${conf_text}"|grep "max-same-clients ="|awk -F ' = ' '{print $NF}')
     max_clients=$(echo -e "${conf_text}"|grep "max-clients ="|awk -F ' = ' '{print $NF}')
 }
-List_User(){
-    declare -A seen
-    if [[ -f "${passwd_file}" ]]; then
+List_User(){ With_Account_Lock _List_User "$@"; }
+_List_User(){
+    local -A seen=()
+    local line u d base marker pw cert acc
+    if [[ -f "$passwd_file" ]]; then
         while IFS='' read -r line || [[ -n "$line" ]]; do
-            u=$(echo "$line" | awk -F':*:' '{print $1}')
-            [[ -n "$u" ]] && seen["$u"]=1
-        done < "${passwd_file}"
+            u="${line%%:*}"
+            [[ -z "$u" ]] || seen["$u"]=1
+        done < "$passwd_file"
     fi
-    if [[ -d "${USERS_DIR}" ]]; then
-        for d in $(find "${USERS_DIR}" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null); do
-            seen["$d"]=1
-        done
+    for d in "$USERS_DIR"/* "$USERS_DIR"/.[!.]* "$USERS_DIR"/..?*; do
+        [[ -d "$d" ]] || continue
+        u="${d##*/}"
+        [[ ! -f "$d/$u.cer" ]] || seen["$u"]=1
+    done
+    for d in "$DISABLED_DIR"/*-susp-* "$DISABLED_DIR"/.*-susp-*; do
+        [[ -d "$d" ]] || continue
+        base="${d##*/}"
+        u="${base%-susp-*}"
+        [[ ! -f "$d/$u.cer" ]] || seen["$u"]=1
+    done
+    for marker in "$DISABLED_DIR"/.pending-disable-* "$DISABLED_DIR"/.pending-delete-*; do
+        [[ -f "$marker" ]] || continue
+        base="${marker##*/}"
+        case "$base" in
+            .pending-disable-*) u="${base#.pending-disable-}" ;;
+            .pending-delete-*) u="${base#.pending-delete-}" ;;
+        esac
+        [[ -z "$u" ]] || seen["$u"]=1
+    done
+    if [[ ${#seen[@]} -eq 0 ]]; then
+        echo -e "${Tip} No users yet."
+        return 0
     fi
-    if [[ -d "${DISABLED_DIR}" ]]; then
-        for d in $(find "${DISABLED_DIR}" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null); do
-            u="${d%-susp-*}"; [[ -n "$u" ]] && seen["$u"]=1
-        done
-    fi
-    if [[ ${#seen[@]} -eq 0 ]]; then echo -e "${Tip} No users yet."; return; fi
-    for u in $(printf "%s\n" "${!seen[@]}" | sort); do
+    while IFS= read -r u; do
         pw=$(_pw_status "$u")
         if _cert_enabled "$u"; then cert="Enable"
-        elif _cert_suspended "$u"; then cert="Disable"
         else cert="Disable"; fi
-        [[ "$pw" == "Enable" || "$cert" == "Enable" ]] && acc="Enable" || acc="Disable"
+        if [[ -f "$DISABLED_DIR/.pending-delete-$u" ]]; then
+            acc="Pending deletion"
+        elif [[ -f "$DISABLED_DIR/.pending-disable-$u" ]]; then
+            acc="Pending disable"
+        elif [[ "$pw" == "Enable" || "$cert" == "Enable" ]]; then
+            acc="Enable"
+        else
+            acc="Disable"
+        fi
         echo "Username: ${u} Account status: ${acc} Certificate: ${cert} Password: ${pw}"
-    done
+    done < <(printf '%s\n' "${!seen[@]}" | sort)
 }
-Disconnect_User(){
-    local u="$1" server_pid socket output active commands action="disconnect" sessions
-    [[ -s "$PID_FILE" ]] || return 0
-    server_pid=$(cat "$PID_FILE") || return 1
-    [[ "$server_pid" =~ ^[1-9][0-9]*$ ]] || return 1
-    kill -0 "$server_pid" 2>/dev/null || return 0
+Require_Terminate_Support(){
+    local status socket commands
+    if Get_Ocserv_PID >/dev/null; then
+        :
+    else
+        status=$?
+        [[ "$status" -eq 1 ]] && return 0
+        return 1
+    fi
     socket=$(Get_Conf_Value occtl-socket-file) || return 1
     local args=(--no-pager)
     [[ -z "$socket" ]] || args+=(--socket-file "$socket")
     commands=$(occtl "${args[@]}" help) || return 1
-    if grep -qE '^[[:space:]]*terminate user[[:space:]]' <<< "$commands"; then
-        action="terminate"
-    else
-        echo -e "${Tip} This ocserv version can only disconnect; upgrade to 1.4.2 or later to invalidate session cookies too." >&2
+    if ! grep -qE '^[[:space:]]*terminate user[[:space:]]' <<< "$commands"; then
+        echo -e "${Error} occtl must support 'terminate user' to invalidate saved session cookies; upgrade ocserv to 1.4.2 or later before disabling or deleting accounts." >&2
+        return 1
     fi
+    # Check control access before changing credentials or certificates.
+    occtl "${args[@]}" show status >/dev/null
+}
+Disconnect_User(){ With_Account_Lock _Disconnect_User "$@"; }
+_Disconnect_User(){
+    local u="$1" status socket output active sessions
+    sanitize_username "$u" || return 1
+    Require_Terminate_Support || return 1
+    if Get_Ocserv_PID >/dev/null; then
+        :
+    else
+        status=$?
+        [[ "$status" -eq 1 ]] && return 0
+        return 1
+    fi
+    socket=$(Get_Conf_Value occtl-socket-file) || return 1
+    local args=(--no-pager)
+    [[ -z "$socket" ]] || args+=(--socket-file "$socket")
     # occtl does not support a standalone --; it treats it as help and returns success.
-    if output=$(occtl "${args[@]}" "$action" user "$u" 2>&1); then
+    if output=$(occtl "${args[@]}" terminate user "$u" 2>&1); then
         return 0
     fi
     # No active or resumable session is a successful no-op; control errors remain failures.
     active=$(occtl "${args[@]}" show users) || { printf '%s\n' "$output" >&2; return 1; }
-    if [[ "$action" == "terminate" ]]; then
-        sessions=$(occtl "${args[@]}" show sessions valid) || { printf '%s\n' "$output" >&2; return 1; }
-        active+=$'\n'"$sessions"
-    fi
+    sessions=$(occtl "${args[@]}" show sessions valid) || { printf '%s\n' "$output" >&2; return 1; }
+    active+=$'\n'"$sessions"
     if awk -v u="$u" '$1 != "id" && $1 != "session" && $2 == u { found = 1 } END { exit !found }' <<< "$active"; then
         printf '%s\n' "$output" >&2
         return 1
     fi
     return 0
 }
-Add_User(){
+Add_User(){ With_Account_Lock _Add_User "$@"; }
+_Add_User(){
+    local username userpass="" user_dir staged_dir staged_passwd status
     read -rp "Please input the username of VPN account
-(Default: admin): " username
-    [[ -z "${username}" ]] && username="admin"
-    sanitize_username "${username}" || { echo -e "${Error} Invalid username"; return 1; }
-    if pw_user_exists "$username" || [[ -e "$USERS_DIR/$username" ]] ||
+(Default: admin): " username || return 1
+    [[ -n "$username" ]] || username="admin"
+    sanitize_username "$username" || { echo -e "${Error} Invalid username"; return 1; }
+    if pw_user_exists "$username"; then
+        status=0
+    else
+        status=$?
+        [[ "$status" -eq 1 ]] || return 1
+    fi
+    if [[ "$status" -eq 0 || -e "$USERS_DIR/$username" || -L "$USERS_DIR/$username" ||
+          -e "$DISABLED_DIR/.pending-delete-$username" || -e "$DISABLED_DIR/.pending-disable-$username" ]] ||
         Find_Suspended_User "$username" >/dev/null; then
-        echo -e "${Error} User already exists; delete it before creating a replacement certificate" >&2
+        echo -e "${Error} User already exists or has an incomplete deletion/disable; finish it before creating a replacement certificate" >&2
         return 1
     fi
     echo && echo -e "   Username : ${username}" && echo
-    # No default password anymore: force interactive input to avoid weak default accounts
-    userpass=""
-    while [[ -z "${userpass}" ]]; do
+    while [[ -z "$userpass" ]]; do
         read -rsp "Please input the password of VPN account (required, cannot be empty): " userpass || return 1
         echo
     done
-
-    mkdir -p "$(dirname "${passwd_file}")" || return 1
-    printf "%s\n%s\n" "${userpass}" "${userpass}" | ocpasswd -c "${passwd_file}" -- "${username}" || { echo -e "${Error} Failed to create password account!"; return 1; }
-    chmod 600 "${passwd_file}" || return 1
-
     Ensure_CRL || return 1
-    user_dir="${USERS_DIR}/${username}"
-    mkdir -p "${user_dir}" && chmod 700 "${user_dir}" || return 1
-    certtool --generate-privkey --outfile "${user_dir}/${username}-key.pem" || { echo -e "${Error} Failed to generate user private key!"; return 1; }
-    cat > "${user_dir}/${username}.tmpl" <<EOF || return 1
+    mkdir -p "$(dirname "$passwd_file")" || return 1
+    staged_passwd=$(mktemp "$(dirname "$passwd_file")/.ocpasswd-stage.XXXXXX") || return 1
+    staged_dir=$(mktemp -d "$USERS_DIR/.add-$username.XXXXXX") || {
+        rm -f "$staged_passwd"
+        return 1
+    }
+    user_dir="$USERS_DIR/$username"
+    # Build everything privately. A late crypto/export failure must not publish a login.
+    if ! (
+        if [[ -e "$passwd_file" || -L "$passwd_file" ]]; then
+            cat "$passwd_file" > "$staged_passwd" || exit 1
+        fi
+        printf '%s\n%s\n' "$userpass" "$userpass" |
+            ocpasswd -c "$staged_passwd" -- "$username" || exit 1
+        chmod 600 "$staged_passwd" || exit 1
+        certtool --generate-privkey --outfile "$staged_dir/$username-key.pem" || exit 1
+        cat > "$staged_dir/$username.tmpl" <<EOF || exit 1
 cn = "${username}"
 tls_www_client
 encryption_key
 signing_key
 expiration_days = 825
 EOF
-    certtool --generate-certificate \
-      --load-privkey "${user_dir}/${username}-key.pem" \
-      --load-ca-certificate "${CA_CERT}" \
-      --load-ca-privkey "${CA_KEY}" \
-      --template "${user_dir}/${username}.tmpl" \
-      --outfile "${user_dir}/${username}.cer" || { echo -e "${Error} Failed to generate user certificate!"; return 1; }
-
-    openssl pkcs12 -export \
-      -inkey "${user_dir}/${username}-key.pem" \
-      -in "${user_dir}/${username}.cer" \
-      -certfile "${CA_CERT}" \
-      -name "AnyConnect VPN – ${username}" \
-      -out "${user_dir}/${username}.p12" \
-      -passout pass:"${userpass}" || { echo -e "${Error} Failed to export p12 bundle!"; return 1; }
-
-    chmod 600 "${user_dir}/${username}-key.pem" "${user_dir}/${username}.p12" || return 1
+        certtool --generate-certificate \
+            --load-privkey "$staged_dir/$username-key.pem" \
+            --load-ca-certificate "$CA_CERT" --load-ca-privkey "$CA_KEY" \
+            --template "$staged_dir/$username.tmpl" \
+            --outfile "$staged_dir/$username.cer" || exit 1
+        openssl pkcs12 -export \
+            -inkey "$staged_dir/$username-key.pem" -in "$staged_dir/$username.cer" \
+            -certfile "$CA_CERT" -name "AnyConnect VPN – $username" \
+            -out "$staged_dir/$username.p12" -passout pass:"$userpass" || exit 1
+        [[ -s "$staged_dir/$username-key.pem" && -s "$staged_dir/$username.cer" &&
+           -s "$staged_dir/$username.p12" ]] || exit 1
+        chmod 600 "$staged_dir/$username-key.pem" "$staged_dir/$username.p12" || exit 1
+    ); then
+        rm -rf -- "$staged_dir"
+        rm -f -- "$staged_passwd" "$staged_passwd.tmp"
+        echo -e "${Error} Failed to prepare the account; no credentials were published." >&2
+        return 1
+    fi
+    if ! mv -T -- "$staged_dir" "$user_dir"; then
+        rm -rf -- "$staged_dir"
+        rm -f -- "$staged_passwd" "$staged_passwd.tmp"
+        return 1
+    fi
+    if ! mv -fT -- "$staged_passwd" "$passwd_file"; then
+        rm -rf -- "$user_dir"
+        rm -f -- "$staged_passwd" "$staged_passwd.tmp"
+        return 1
+    fi
     echo -e "${Info} Created user '${username}' with certificate and password."
     echo "  ${user_dir}/${username}.p12   (import to device; password is the one you just entered)"
     echo "  ${CA_CERT} (install/trust if prompted)"
 }
-Del_User(){
-    List_User
+Del_User(){ With_Account_Lock _Del_User "$@"; }
+_Del_User(){
+    local u
+    List_User || return 1
     echo "Please input username of account to delete"
-    read -rp "(Default canceling): " u
-    [[ -z "${u}" ]] && echo "Canceled..." && return 1
-
-	sanitize_username "${u}" || { echo -e "${Error} Invalid username"; return 1; }
-
-    # Remove password access before revoking certificates and disconnecting sessions
-    pw_delete "${u}" || return 1
-
-    # Revoke active and suspended certificates
-    Delete_Cert_User "${u}" || return 1
+    read -rp "(Default canceling): " u || return 1
+    [[ -n "$u" ]] || { echo "Canceled..."; return 1; }
+    sanitize_username "$u" || { echo -e "${Error} Invalid username"; return 1; }
+    Require_Terminate_Support || return 1
+    Ensure_CRL || return 1
+    : > "$DISABLED_DIR/.pending-delete-$u" || return 1
+    # Record intent before removing access; retries must finish revocation, not add a replacement.
+    pw_delete "$u" || return 1
+    Delete_Cert_User "$u" || return 1
     echo -e "${Info} Deleted user '${u}' (certificate revoked and files removed; password account removed)."
 }
-Modify_User_disabled(){
-  List_User
+Modify_User_disabled(){ With_Account_Lock _Modify_User_disabled "$@"; }
+_Modify_User_disabled(){
+    local u
+    List_User || return 1
     echo "Please type Enable/Disable VPN account username"
-    read -rp "(Default canceling): " u
-    [[ -z "${u}" ]] && echo "Canceled..." && return 1
-
-	sanitize_username "${u}" || { echo -e "${Error} Invalid username"; return 1; }
-
-    if [[ -f "${USERS_DIR}/${u}/${u}.cer" ]]; then
+    read -rp "(Default canceling): " u || return 1
+    [[ -n "$u" ]] || { echo "Canceled..."; return 1; }
+    sanitize_username "$u" || { echo -e "${Error} Invalid username"; return 1; }
+    if [[ -e "$DISABLED_DIR/.pending-delete-$u" ]]; then
+        echo -e "${Error} Deletion is incomplete for '$u'; retry deleting this user first." >&2
+        return 1
+    fi
+    # Retry the intended disable, including failures after CRL publication or termination.
+    if [[ -f "$DISABLED_DIR/.pending-disable-$u" || -f "$USERS_DIR/$u/$u.cer" ]]; then
+        Require_Terminate_Support || return 1
+        Ensure_CRL || return 1
+        : > "$DISABLED_DIR/.pending-disable-$u" || return 1
         echo -e "${Info} Suspending certificate and disabling password for '${u}' ..."
-        pw_lock "${u}" || return 1
-        Suspend_Cert_User "${u}" || return 1
+        pw_lock "$u" || return 1
+        Suspend_Cert_User "$u" || return 1
         echo -e "${Info} '${u}' is now Disabled (Certificate: Disable, Password: Disable)."
         return 0
     fi
-
-    last_dir=$(Find_Suspended_User "${u}" || true)
-    if [[ -n "${last_dir}" ]]; then
+    if Find_Suspended_User "$u" >/dev/null; then
         echo -e "${Info} Unsuspending certificate and enabling password for '${u}' ..."
-        Unsuspend_Cert_User "${u}" || return 1
-        pw_unlock "${u}" || return 1
+        Unsuspend_Cert_User "$u" || return 1
+        if ! pw_unlock "$u"; then
+            : > "$DISABLED_DIR/.pending-disable-$u" || return 1
+            Suspend_Cert_User "$u" || return 1
+            return 1
+        fi
         echo -e "${Info} '${u}' is now Enabled (Certificate: Enable, Password: Enable)."
         return 0
     fi
-
     echo -e "${Tip} No certificate found for '${u}'. Add the user first."
+    return 1
 }
 Set_Pass(){
     check_installed_status
@@ -591,6 +828,25 @@ Set_Pass(){
 }
 # Helpers for unified manager
 
+With_Account_Lock(){
+    if [[ "${_ACCOUNT_LOCK_PID:-}" == "$BASHPID" ]]; then
+        "$@"
+        return $?
+    fi
+    # A fork must release its inherited descriptor before waiting for its own lock.
+    if [[ "${_ACCOUNT_LOCK_FD:-}" =~ ^[0-9]+$ ]]; then
+        exec {_ACCOUNT_LOCK_FD}>&-
+    fi
+    (
+        umask 077
+        mkdir -p "$SSL_DIR" || return 1
+        local _ACCOUNT_LOCK_FD _ACCOUNT_LOCK_PID
+        exec {_ACCOUNT_LOCK_FD}>>"$SSL_DIR/.accounts.lock" || return 1
+        flock -x "$_ACCOUNT_LOCK_FD" || return 1
+        _ACCOUNT_LOCK_PID=$BASHPID
+        "$@"
+    )
+}
 sanitize_username() {
   local u="$1"
   [[ "$u" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || return 1
@@ -598,11 +854,14 @@ sanitize_username() {
   return 0
 }
 pw_user_exists() {
-  local u="$1"
-  [[ -f "${passwd_file}" ]] || return 1
-  awk -F':*:' -v u="$u" '$1==u{found=1} END{exit found?0:1}' "${passwd_file}"
+  local u="$1" found
+  [[ -e "$passwd_file" || -L "$passwd_file" ]] || return 1
+  [[ -f "$passwd_file" ]] || return 2
+  found=$(awk -F: -v u="$u" '$1==u{found=1} END{if(found) print "yes"}' "$passwd_file") || return 2
+  [[ -n "$found" ]]
 }
-pw_action() {
+pw_action(){ With_Account_Lock _pw_action "$@"; }
+_pw_action() {
   local action="$1" u="$2" found
   [[ -e "${passwd_file}" || -L "${passwd_file}" ]] || return 0
   [[ -f "${passwd_file}" ]] || return 1
@@ -764,7 +1023,8 @@ Set_iptables(){
     Firewall_Service_ocserv
 }
 # Ensure CRL files exist and minimal template
-Ensure_CRL(){
+Ensure_CRL(){ With_Account_Lock _Ensure_CRL "$@"; }
+_Ensure_CRL(){
     mkdir -p "$SSL_DIR" "$USERS_DIR" "$DISABLED_DIR" || return 1
     if [[ ! -s "$CRL_TMPL" ]]; then
         printf 'crl_next_update = 365\n' > "$CRL_TMPL" || return 1
@@ -775,21 +1035,36 @@ Ensure_CRL(){
     fi
 }
 # Rebuild suspended list from disabled/*-susp-* directories
-Rebuild_SUSPENDED_PEM(){
-    local d base u
-    : > "$SUSPENDED_PEM" || return 1
-    for d in "$DISABLED_DIR"/*-susp-*; do
+Rebuild_SUSPENDED_PEM(){ With_Account_Lock _Rebuild_SUSPENDED_PEM "$@"; }
+_Rebuild_SUSPENDED_PEM(){
+    local d base u suspended_next
+    suspended_next=$(mktemp "$SSL_DIR/.suspended-next.XXXXXX") || return 1
+    for d in "$DISABLED_DIR"/*-susp-* "$DISABLED_DIR"/.*-susp-*; do
         [[ -d "$d" ]] || continue
         base="${d##*/}"
         u="${base%-susp-*}"
         if [[ -f "$d/$u.cer" ]]; then
-            cat "$d/$u.cer" >> "$SUSPENDED_PEM" || return 1
+            if ! cat "$d/$u.cer" >> "$suspended_next"; then
+                rm -f "$suspended_next"
+                return 1
+            fi
         fi
     done
+    if ! mv -f "$suspended_next" "$SUSPENDED_PEM"; then
+        rm -f "$suspended_next"
+        return 1
+    fi
 }
 # Rebuild CRL from permanent + suspended lists
-Rebuild_CRL(){
-    local crl_input crl_next server_pid
+Rebuild_CRL(){ With_Account_Lock _Rebuild_CRL "$@"; }
+_Rebuild_CRL(){
+    local crl_input crl_next server_pid status
+    if server_pid=$(Get_Ocserv_PID); then
+        :
+    else
+        status=$?
+        [[ "$status" -eq 1 ]] || return 1
+    fi
     crl_input=$(mktemp "$SSL_DIR/.crl-input.XXXXXX") || return 1
     crl_next=$(mktemp "$SSL_DIR/.crl-next.XXXXXX") || { rm -f "$crl_input"; return 1; }
     if ! cat "$REVOKED_PEM" "$SUSPENDED_PEM" > "$crl_input"; then
@@ -808,14 +1083,17 @@ Rebuild_CRL(){
         rm -f "$crl_next"
         return 1
     fi
-    if [[ -s "$PID_FILE" ]]; then
-        server_pid=$(cat "$PID_FILE") || return 1
-        [[ "$server_pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    if server_pid=$(Get_Ocserv_PID); then
         kill -HUP "$server_pid" || return 1
+    else
+        status=$?
+        [[ "$status" -eq 1 ]] || return 1
     fi
+    return 0
 }
 # Configure auth to certificate default + plain fallback (OR)
-Configure_Auth(){
+Configure_Auth(){ With_Account_Lock _Configure_Auth "$@"; }
+_Configure_Auth(){
     [[ ! -e ${conf} ]] && echo -e "${Error} ocserv config file doesn't exist !" && return 1
     # Delete every script-managed entry first, then append once (config is order-independent)
     sed -i '/^\s*ca-cert\s*=/d; /^\s*crl\s*=/d; /^\s*cert-user-oid\s*=/d; /^\s*auth\s*=/d; /^\s*enable-auth\s*=/d' "${conf}" || return 1
@@ -829,64 +1107,93 @@ EOF
     echo -e "${Info} Enabled certificate default + password fallback in ${conf}"
 }
 # Certificate user management
-Delete_Cert_User(){
-    local u="${1:-}"
+Delete_Cert_User(){ With_Account_Lock _Delete_Cert_User "$@"; }
+_Delete_Cert_User(){
+    local u="${1:-}" d
     if [[ -z "$u" ]]; then
-      echo "Delete which username? (revokes active cert first)"
-      read -e -p "(Default canceling): " u
+        echo "Delete which username? (revokes active cert first)"
+        read -rp "(Default canceling): " u || return 1
     fi
-    [[ -z "$u" ]] && echo "Canceled..." && return 1
+    [[ -n "$u" ]] || { echo "Canceled..."; return 1; }
     sanitize_username "$u" || { echo -e "${Error} Invalid username"; return 1; }
+    Require_Terminate_Support || return 1
     Ensure_CRL || return 1
-    if [[ -f "${USERS_DIR}/${u}/${u}.cer" ]]; then
-        cat "${USERS_DIR}/${u}/${u}.cer" >> "${REVOKED_PEM}" || return 1
-        rm -rf "${USERS_DIR}/${u}" || return 1
+    : > "$DISABLED_DIR/.pending-delete-$u" || return 1
+    if [[ -f "$USERS_DIR/$u/$u.cer" ]]; then
+        cat "$USERS_DIR/$u/$u.cer" >> "$REVOKED_PEM" || return 1
+        rm -rf -- "$USERS_DIR/$u" || return 1
     fi
-    local d
-    for d in "${DISABLED_DIR}/${u}-susp-"*; do
+    for d in "$DISABLED_DIR/$u-susp-"*; do
         [[ -f "$d/$u.cer" ]] || continue
         cat "$d/$u.cer" >> "$REVOKED_PEM" || return 1
-        rm -rf "$d" || return 1
+        rm -rf -- "$d" || return 1
     done
     # A retry must apply saved revocations even when the certificate directories are gone.
     Rebuild_SUSPENDED_PEM || return 1
     Rebuild_CRL || return 1
     Disconnect_User "$u" || return 1
+    rm -f -- "$DISABLED_DIR/.pending-delete-$u" "$DISABLED_DIR/.pending-disable-$u" || return 1
     echo -e "${Info} Deleted ${u} (revocation persists in CRL)."
 }
-Suspend_Cert_User(){
-    local u="${1:-}"
+Suspend_Cert_User(){ With_Account_Lock _Suspend_Cert_User "$@"; }
+_Suspend_Cert_User(){
+    local u="${1:-}" user_dir ts pending
     if [[ -z "$u" ]]; then
-      echo "Suspend (temporarily disable) which cert username?"
-      read -e -p "(Default canceling): " u
+        echo "Suspend (temporarily disable) which cert username?"
+        read -rp "(Default canceling): " u || return 1
     fi
-    [[ -z "$u" ]] && echo "Canceled..." && return 1
+    [[ -n "$u" ]] || { echo "Canceled..."; return 1; }
     sanitize_username "$u" || { echo -e "${Error} Invalid username"; return 1; }
-    user_dir="${USERS_DIR}/${u}"
-    [[ ! -f "${user_dir}/${u}.cer" ]] && echo -e "${Error} ${user_dir}/${u}.cer not found" && return 1
+    if [[ -e "$DISABLED_DIR/.pending-delete-$u" ]]; then
+        echo -e "${Error} Deletion is incomplete for '$u'; retry deleting this user first." >&2
+        return 1
+    fi
+    Require_Terminate_Support || return 1
+    user_dir="$USERS_DIR/$u"
+    pending="$DISABLED_DIR/.pending-disable-$u"
+    if [[ ! -f "$user_dir/$u.cer" ]]; then
+        [[ -f "$pending" ]] && Find_Suspended_User "$u" >/dev/null || {
+            echo -e "${Error} No active or pending suspended certificate found: $u" >&2
+            return 1
+        }
+    fi
     Ensure_CRL || return 1
-    ts=$(date +%Y%m%d-%H%M%S)
-    mkdir -p "${DISABLED_DIR}" || return 1
-    mv "${user_dir}" "${DISABLED_DIR}/${u}-susp-${ts}" || return 1
+    : > "$pending" || return 1
+    if [[ -f "$user_dir/$u.cer" ]]; then
+        ts=$(date +%Y%m%d-%H%M%S) || return 1
+        mv -T -- "$user_dir" "$DISABLED_DIR/$u-susp-$ts" || return 1
+    fi
+    # Keep the marker until both CRL reload and saved-cookie invalidation finish.
     Rebuild_SUSPENDED_PEM || return 1
     Rebuild_CRL || return 1
     Disconnect_User "$u" || return 1
+    rm -f -- "$pending" || return 1
     echo -e "${Info} Suspended ${u}."
 }
-Unsuspend_Cert_User(){
-    local u="${1:-}"
+Unsuspend_Cert_User(){ With_Account_Lock _Unsuspend_Cert_User "$@"; }
+_Unsuspend_Cert_User(){
+    local u="${1:-}" last_dir
     if [[ -z "$u" ]]; then
-      echo "Unsuspend (re-enable same certificate) which username?"
-      read -e -p "(Default canceling): " u
+        echo "Unsuspend (re-enable same certificate) which username?"
+        read -rp "(Default canceling): " u || return 1
     fi
-    [[ -z "$u" ]] && echo "Canceled..." && return 1
+    [[ -n "$u" ]] || { echo "Canceled..."; return 1; }
     sanitize_username "$u" || { echo -e "${Error} Invalid username"; return 1; }
-    local last_dir
-    last_dir=$(Find_Suspended_User "$u") || { echo -e "${Error} No suspended certificate found: $u" >&2; return 1; }
-    [[ -z "${last_dir}" ]] && echo -e "${Error} No suspended archive found for ${u}" && return 1
-    mv "${last_dir}" "${USERS_DIR}/${u}" || return 1
-    Rebuild_SUSPENDED_PEM || return 1
-    Rebuild_CRL || return 1
+    if [[ -e "$DISABLED_DIR/.pending-delete-$u" || -e "$DISABLED_DIR/.pending-disable-$u" ]]; then
+        echo -e "${Error} An account operation is incomplete for '$u'; finish the pending disable or deletion before restoring it." >&2
+        return 1
+    fi
+    last_dir=$(Find_Suspended_User "$u") || {
+        echo -e "${Error} No suspended certificate found: $u" >&2
+        return 1
+    }
+    mv -T -- "$last_dir" "$USERS_DIR/$u" || return 1
+    if ! Rebuild_SUSPENDED_PEM || ! Rebuild_CRL; then
+        # A failed restore must finish disabling before it can be restored again.
+        : > "$DISABLED_DIR/.pending-disable-$u" || return 1
+        Suspend_Cert_User "$u" || return 1
+        return 1
+    fi
     echo -e "${Info} Unsuspended ${u}."
 }
 Update_Shell(){

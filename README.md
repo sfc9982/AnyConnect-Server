@@ -194,6 +194,9 @@ ocserv from each installer, connects with OpenConnect, verifies TCP/DTLS traffic
 DNS and NAT, and exercises account disable/restore/delete and saved-session
 cookie invalidation. See
 [tests/README.md](tests/README.md) for coverage, local commands, and test boundaries.
+Fault-injection and concurrent-account checks cover interrupted operations and
+safe retries. The traffic fixture uses production helpers and starts the daemon
+directly; systemd boot behavior is outside this suite.
 
 ## Credits and license
 

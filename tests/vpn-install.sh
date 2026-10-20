@@ -56,3 +56,5 @@ esac
 openconnect --version
 certtool --version
 echo 'Source build and real client dependencies installed'
+
+bash "$repo_dir/tests/account-concurrency.sh" "$script"

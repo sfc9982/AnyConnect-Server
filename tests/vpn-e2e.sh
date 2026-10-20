@@ -277,12 +277,14 @@ password="E2e-$(openssl rand -hex 16)"
 control_password="Control-$(openssl rand -hex 16)"
 printf 'e2e-susp-user\n%s\n' "$password" > "$state_dir/account.input"
 printf 'e2e-control\n%s\n' "$control_password" > "$state_dir/control.input"
+printf 'e2e-failed-user\n%s\n' "$password" > "$state_dir/account-failure.input"
 # These are exclusively disposable test-container paths, never a host install.
 rm -rf /etc/ocserv /tmp/ssl
 rm -f /var/run/ocserv.pid /var/run/ocserv-socket* /var/run/occtl.socket
 server_action configure > "$log_dir/configure.log" 2>&1
 server_action add > "$log_dir/accounts.log" 2>&1
 server_action duplicate >> "$log_dir/accounts.log" 2>&1
+server_action add-failed-certificate > "$log_dir/add-failed-certificate.log" 2>&1
 openssl pkcs12 -in "$state_dir/client.p12" -passin "pass:$password" -noout
 server_action firewall > "$log_dir/firewall.log" 2>&1
 target_unreachable
@@ -295,7 +297,14 @@ for ((i=0; i<100; i++)); do
     sleep 0.1
 done
 ip netns exec "$server_ns" ss -ltn | grep -q '192.0.2.1:4443' || fail 'server not listening'
+[[ -s "$state_dir/ocserv-test.pid" && ! -e /var/run/ocserv.pid ]] || fail 'custom PID fixture did not replace the default PID path'
 auth_result allow password e2e-control "$control_password" initial-control
+auth_result deny password e2e-failed-user "$password" failed-add-password
+server_action add-retry > "$log_dir/add-retry.log" 2>&1
+auth_result allow password e2e-failed-user "$password" retried-add-password
+server_action delete-retried-account > "$log_dir/delete-retried-account.log" 2>&1
+server_action legacy-revocation > "$log_dir/legacy-revocation.log" 2>&1
+auth_result allow password e2e-susp-user "$password" legacy-preflight-preserves-account
 auth_result deny password e2e-susp-user wrong-password bad-password
 auth_result deny password missing-user wrong-password unknown-user
 
@@ -313,6 +322,7 @@ check_traffic dtls certificate-cookie
 detach_client
 connect_client certificate dtls certificate-live
 check_traffic dtls certificate-live
+server_action toggle-failed-crl > "$log_dir/disable-failed-crl.log" 2>&1
 server_action toggle > "$log_dir/disable.log" 2>&1
 # Revocation changes are reloaded in the running server, not hidden by a restart.
 sleep 1
@@ -324,6 +334,15 @@ detach_client
 reject_saved_cookie "$state_dir/certificate-dtls.cookie" disabled-cookie
 auth_result deny password e2e-susp-user "$password" disabled-password
 auth_result deny certificate e2e-susp-user '' disabled-certificate
+
+# A failed reload can occur after the restoring CRL is already on disk. Its
+# rollback can fail too; the next toggle must finish disabling before restoring.
+server_action restore-failed-reload > "$log_dir/restore-failed-reload.log" 2>&1
+server_action toggle > "$log_dir/restore-rollback-disable-retry.log" 2>&1
+sleep 1
+auth_result deny password e2e-susp-user "$password" restore-rollback-retry-password
+auth_result deny certificate e2e-susp-user '' restore-rollback-retry-certificate
+echo "PASS: $script failed published-CRL restore and rollback retry finish disable"
 
 server_action toggle > "$log_dir/restore.log" 2>&1
 sleep 1
@@ -363,7 +382,18 @@ server_action toggle > "$log_dir/certificate-only-restore.log" 2>&1
 sleep 1
 connect_client certificate tls certificate-only-restored
 check_traffic tls certificate-only-restored
+server_action toggle-failed-disconnect > "$log_dir/disable-failed-disconnect.log" 2>&1
+server_action toggle > "$log_dir/disable-disconnect-retry.log" 2>&1
+sleep 1
+target_unreachable
+detach_client
+auth_result deny certificate e2e-susp-user '' disable-disconnect-retry
+server_action toggle > "$log_dir/restore-after-disconnect-retry.log" 2>&1
+sleep 1
+connect_client certificate tls restored-after-disconnect-retry
+check_traffic tls restored-after-disconnect-retry
 server_action delete-failed-crl > "$log_dir/delete-failed-crl.log" 2>&1
+server_action pending-delete-guards > "$log_dir/pending-delete-guards.log" 2>&1
 server_action delete > "$log_dir/delete-retry.log" 2>&1
 sleep 1
 target_unreachable
