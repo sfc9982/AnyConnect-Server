@@ -69,6 +69,8 @@ signature and TLS verification stay enabled.
 | Delete and revoke | Delete terminates the active tunnel; the saved client certificate and password no longer authenticate |
 | Session cookies | A saved cookie first reconnects and transfers real data; after disable/delete it cannot create a tunnel, even when it belonged to a separate detached session |
 | Account identity | A username containing `-susp-` survives the complete lifecycle; duplicate creation cannot overwrite existing credentials |
+| Certificate-only accounts | Removing the password record still permits certificate traffic, disable, restore, and permanent revocation |
+| Deletion retry | A deliberate CRL-generation failure is reported and preserves the live CRL; retrying deletion revokes the certificate, and repeated deletion succeeds |
 | Failure controls | Target access fails before connection, after disconnect, and when tunnel forwarding is deliberately blocked; every negative login is followed by a valid control login |
 
 The target has no route back to the VPN address pool and is never connected

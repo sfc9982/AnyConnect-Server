@@ -348,6 +348,31 @@ auth_result deny password e2e-susp-user "$password" deleted-password
 auth_result deny certificate e2e-susp-user '' revoked-certificate
 target_unreachable
 
+# A certificate can outlive its password record. The same lifecycle operations
+# must still work, including retrying a deletion after CRL generation failed.
+server_action certificate-only > "$log_dir/certificate-only-account.log" 2>&1
+auth_result deny password e2e-susp-user "$password" certificate-only-password
+connect_client certificate tls certificate-only
+check_traffic tls certificate-only
+server_action toggle > "$log_dir/certificate-only-disable.log" 2>&1
+sleep 1
+target_unreachable
+detach_client
+auth_result deny certificate e2e-susp-user '' certificate-only-disabled
+server_action toggle > "$log_dir/certificate-only-restore.log" 2>&1
+sleep 1
+connect_client certificate tls certificate-only-restored
+check_traffic tls certificate-only-restored
+server_action delete-failed-crl > "$log_dir/delete-failed-crl.log" 2>&1
+server_action delete > "$log_dir/delete-retry.log" 2>&1
+sleep 1
+target_unreachable
+detach_client
+auth_result deny certificate e2e-susp-user '' certificate-only-deleted
+server_action delete > "$log_dir/delete-repeat.log" 2>&1
+auth_result allow password e2e-control "$control_password" delete-repeat-control
+echo "PASS: $script certificate-only lifecycle and failed-CRL deletion retry"
+
 kill -TERM "$server_pid"
 wait "$server_pid" || true
 server_pid=''

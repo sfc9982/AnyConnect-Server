@@ -46,13 +46,20 @@ EOF
         Set_Conf_Value max-ban-score 0 || exit 1
         "$file" --test-config -c "$conf" || fail 'ocserv rejected generated configuration'
         ;;
-    add)
+    add|certificate-only)
         Add_User < "$state_dir/account.input" || fail 'account creation failed'
         cp "$USERS_DIR/e2e-susp-user/e2e-susp-user.cer" "$state_dir/client.cer" || exit 1
         cp "$USERS_DIR/e2e-susp-user/e2e-susp-user-key.pem" "$state_dir/client-key.pem" || exit 1
         cp "$USERS_DIR/e2e-susp-user/e2e-susp-user.p12" "$state_dir/client.p12" || exit 1
         cp "$CA_CERT" "$state_dir/ca.pem" || exit 1
-        Add_User < "$state_dir/control.input" || fail 'control account creation failed'
+        if [[ "$action" == add ]]; then
+            Add_User < "$state_dir/control.input" || fail 'control account creation failed'
+        else
+            pw_delete e2e-susp-user || fail 'certificate-only fixture setup failed'
+            if pw_user_exists e2e-susp-user; then
+                fail 'certificate-only fixture retained a password account'
+            fi
+        fi
         ;;
     duplicate)
         before="$(sha256sum "$passwd_file" "$USERS_DIR/e2e-susp-user/e2e-susp-user.cer")"
@@ -75,6 +82,26 @@ EOF
         ;;
     delete)
         Del_User <<< 'e2e-susp-user' || fail 'account deletion failed'
+        ;;
+    delete-failed-crl)
+        before="$(sha256sum "$CRL_PEM")" || exit 1
+        crl_failure_injected=0
+        # Exercise a failed CRL update without changing the running server or
+        # bypassing the installer's real deletion and retry paths.
+        certtool() {
+            if [[ "${1:-}" == --generate-crl ]]; then
+                crl_failure_injected=1
+                echo 'Injected CRL generation failure' >&2
+                return 73
+            fi
+            command certtool "$@"
+        }
+        if Del_User <<< 'e2e-susp-user'; then
+            fail 'account deletion concealed a CRL generation failure'
+        fi
+        [[ "$crl_failure_injected" == 1 ]] || fail 'deletion failed before CRL generation'
+        [[ "$before" == "$(sha256sum "$CRL_PEM")" ]] ||
+            fail 'failed CRL generation replaced the live CRL'
         ;;
     *) fail "unknown action: $action" ;;
 esac

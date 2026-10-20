@@ -602,9 +602,18 @@ pw_user_exists() {
   [[ -f "${passwd_file}" ]] || return 1
   awk -F':*:' -v u="$u" '$1==u{found=1} END{exit found?0:1}' "${passwd_file}"
 }
-pw_lock()   { local u="$1"; pw_user_exists "$u" && ocpasswd -c "${passwd_file}" -l -- "$u" >/dev/null 2>&1; }
-pw_unlock() { local u="$1"; pw_user_exists "$u" && ocpasswd -c "${passwd_file}" -u -- "$u" >/dev/null 2>&1; }
-pw_delete() { local u="$1"; pw_user_exists "$u" && ocpasswd -c "${passwd_file}" -d -- "$u" >/dev/null 2>&1; }
+pw_action() {
+  local action="$1" u="$2" found
+  [[ -e "${passwd_file}" || -L "${passwd_file}" ]] || return 0
+  [[ -f "${passwd_file}" ]] || return 1
+  # Scan the entire file to distinguish absence from read errors; END preserves awk failures.
+  found=$(awk -F: -v u="$u" '$1==u{found=1} END{if(found) print "yes"}' "${passwd_file}") || return 1
+  [[ -n "$found" ]] || return 0
+  ocpasswd -c "${passwd_file}" "$action" -- "$u" >/dev/null 2>&1
+}
+pw_lock()   { pw_action -l "$1"; }
+pw_unlock() { pw_action -u "$1"; }
+pw_delete() { pw_action -d "$1"; }
 _pw_status(){
     local u="$1"
     if [[ -f "${passwd_file}" ]]; then
@@ -829,23 +838,19 @@ Delete_Cert_User(){
     [[ -z "$u" ]] && echo "Canceled..." && return 1
     sanitize_username "$u" || { echo -e "${Error} Invalid username"; return 1; }
     Ensure_CRL || return 1
-    added=0
     if [[ -f "${USERS_DIR}/${u}/${u}.cer" ]]; then
         cat "${USERS_DIR}/${u}/${u}.cer" >> "${REVOKED_PEM}" || return 1
         rm -rf "${USERS_DIR}/${u}" || return 1
-        added=1
     fi
     local d
     for d in "${DISABLED_DIR}/${u}-susp-"*; do
         [[ -f "$d/$u.cer" ]] || continue
         cat "$d/$u.cer" >> "$REVOKED_PEM" || return 1
         rm -rf "$d" || return 1
-        added=1
     done
-    if [[ $added -eq 1 ]]; then
-        Rebuild_SUSPENDED_PEM || return 1
-        Rebuild_CRL || return 1
-    fi
+    # A retry must apply saved revocations even when the certificate directories are gone.
+    Rebuild_SUSPENDED_PEM || return 1
+    Rebuild_CRL || return 1
     Disconnect_User "$u" || return 1
     echo -e "${Info} Deleted ${u} (revocation persists in CRL)."
 }
