@@ -132,14 +132,56 @@ new_fixture() {
 # only the final credentials and signed CRL determine whether the test passes.
 wait_for() {
     local mode="$1" label="$2" first="${3:-}" expected="${4:-}"
-    python3 - "$mode" "$case_dir" "$label" "$first" "$expected" <<'PY' || fail "$mode barrier for $label failed"
+    python3 - "$mode" "$case_dir" "$label" "$first" "$expected" "${workers[$label]}" <<'PY' || fail "$mode barrier for $label failed"
 import os
 from pathlib import Path
 import sys
 import time
 
-mode, directory, label, first, expected = sys.argv[1:]
+mode, directory, label, first, expected, worker_pid = sys.argv[1:]
 root = Path(directory)
+lock_path = str(root / "ssl" / ".accounts.lock")
+observed = {}
+
+def blocked_contender():
+    # /proc/locks can hide locks whose original owner exited, and OverlayFS
+    # inode identities need not match stat(). Inspect only this worker's live
+    # descendants and their actual lock descriptor/kernel wait instead.
+    pending = [int(worker_pid)]
+    while pending:
+        pid = pending.pop()
+        process = Path("/proc") / str(pid)
+        try:
+            pending.extend(map(int, (process / "task" / str(pid) / "children").read_text().split()))
+            if Path(os.readlink(process / "exe")).name != "flock":
+                continue
+            descriptors = {
+                int(fd.name) for fd in (process / "fd").iterdir()
+                if os.readlink(fd) == lock_path
+            }
+            if not descriptors:
+                continue
+            wait_channel = (process / "wchan").read_text().strip()
+            observed[pid] = wait_channel
+            try:
+                syscall = (process / "syscall").read_text().split()
+                # All CI images run on the runner's x86_64 kernel: flock=73,
+                # with the file descriptor and LOCK_EX (2) as its arguments.
+                if (os.uname().machine == "x86_64" and len(syscall) >= 3
+                        and int(syscall[0], 0) == 73
+                        and int(syscall[1], 0) in descriptors
+                        and int(syscall[2], 0) == 2):
+                    return True
+            except (OSError, ValueError):
+                pass
+            if wait_channel in {"locks_lock_inode_wait", "flock_lock_inode_wait"}:
+                return True
+        except OSError:
+            # Processes can exit between reads; their recorded result is
+            # checked by the surrounding loop and final status assertions.
+            continue
+    return False
+
 deadline = time.monotonic() + 30
 while time.monotonic() < deadline:
     status = root / (label + ".status")
@@ -154,18 +196,12 @@ while time.monotonic() < deadline:
             sys.exit(0)
         if (root / (first + ".status")).exists():
             sys.exit("First writer exited before its barrier was released")
-        lock = root / "ssl" / ".accounts.lock"
-        if lock.exists():
-            info = lock.stat()
-            identity = f"{os.major(info.st_dev):02x}:{os.minor(info.st_dev):02x}:{info.st_ino}"
-            for line in Path("/proc/locks").read_text().splitlines():
-                fields = line.split()
-                if "->" in fields and "FLOCK" in fields and identity in fields:
-                    sys.exit(0)
+        if blocked_contender():
+            sys.exit(0)
     elif status.exists():
         sys.exit("Writer exited before reaching the expected barrier")
     time.sleep(0.05)
-sys.exit("Timed out waiting for an observed worker state")
+sys.exit(f"Timed out waiting for an observed worker state; flock wait channels: {observed}")
 PY
 }
 
