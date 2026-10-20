@@ -4,7 +4,16 @@ set -euo pipefail
 
 : "${VPNC_REAL_SCRIPT:?}" "${VPNC_STATE_DIR:?}"
 # Keep OpenConnect's private cookie stdout separate from routing diagnostics.
-"$VPNC_REAL_SCRIPT" >&2
+# Older distro scripts key saved routes by PPID. Sourcing in a subshell preserves
+# OpenConnect as that parent across callbacks, while containing the script's exit
+# and shell state. Match the stock script's normal non-strict shell options.
+(
+    set +e
+    set +u
+    set +o pipefail
+    # shellcheck disable=SC1090
+    source "$VPNC_REAL_SCRIPT"
+) >&2
 case "${reason:-}" in
     connect|reconnect)
         printf '%s\n' "${INTERNAL_IP4_ADDRESS:-}" > "$VPNC_STATE_DIR/address"

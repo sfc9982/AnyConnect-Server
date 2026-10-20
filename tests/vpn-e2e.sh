@@ -62,6 +62,15 @@ cleanup() {
     done
     rm -rf "$state_root"
     rm -rf "/etc/netns/$client_ns"
+    # Some distro client builds log HTTP headers even at their default level.
+    # Remove every cookie header before printing excerpts or uploading artifacts.
+    for log in "$log_root"/*.log "$log_root"/*/*.log; do
+        [[ -f "$log" ]] || continue
+        if ! sed -i -E 's/^((Set-Cookie|Cookie):).*/\1 <redacted>/I' "$log"; then
+            rm -f "$log"
+            status=1
+        fi
+    done
     if ((status != 0)); then
         echo 'VPN E2E failed; final server/client log excerpts:' >&2
         for log in "$log_root"/*.log "$log_root"/*/*.log; do
@@ -179,7 +188,7 @@ connect_client() {
     fi
     [[ "$transport" == dtls ]] || connection+=(--no-dtls)
     ip netns exec "$client_ns" "${connection[@]}" --printcookie --interface vpntest \
-        --script "bash $repo_dir/tests/vpn-vpnc.sh" https://192.0.2.1:4443/ \
+        --script "exec bash $repo_dir/tests/vpn-vpnc.sh" https://192.0.2.1:4443/ \
         <<< "$secret" > "$state_dir/$label.cookie" 2> "$log_dir/$label.log" &
     client_pid=$!
     for ((i=0; i<150; i++)); do
@@ -211,7 +220,7 @@ reject_saved_cookie() {
     client_args cookie e2e-susp-user
     # Attempt the actual tunnel phase, with no fresh authentication fallback.
     if ip netns exec "$client_ns" timeout --kill-after=3 15 "${connection[@]}" \
-        --no-dtls --interface vpntest --script "bash $repo_dir/tests/vpn-vpnc.sh" \
+        --no-dtls --interface vpntest --script "exec bash $repo_dir/tests/vpn-vpnc.sh" \
         https://192.0.2.1:4443/ < "$cookie_file" > /dev/null 2> "$log_dir/$label.log"; then
         status=0
     else
@@ -220,7 +229,7 @@ reject_saved_cookie() {
     [[ ! -e "$VPNC_STATE_DIR/address" ]] || fail "$label: revoked cookie established a tunnel"
     [[ "$status" != 0 && "$status" != 124 && "$status" != 137 ]] ||
         fail "$label: expected cookie rejection, got status $status"
-    grep -Fq 'Cookie was rejected by server; exiting.' "$log_dir/$label.log" ||
+    grep -Eq 'Cookie was rejected by server; exiting\.|HTTP/1\.[01] 401 Cookie is not acceptable' "$log_dir/$label.log" ||
         fail "$label: no explicit server cookie rejection"
     auth_result allow password e2e-control "$control_password" "$label-control"
     echo "PASS: $script $label (saved session cannot reconnect)"

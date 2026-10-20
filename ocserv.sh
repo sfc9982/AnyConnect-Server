@@ -259,7 +259,8 @@ Installation_dependency(){
 			pacman -Syu --noconfirm tar xz meson ninja protobuf-c base-devel vim net-tools gnutls libseccomp libev libnl readline ca-certificates wget iproute2 procps-ng iptables openssl lz4 ipcalc
 			;;
 		zypper)
-			zypper -n install tar xz meson ninja libprotobuf-c-devel gnutls gcc make vim net-tools pkg-config gnutls-devel libseccomp-devel libev-devel libnl3-devel readline-devel liblz4-devel ca-certificates wget iproute2 procps iptables openssl ipcalc
+			# 最小化 SUSE 镜像需要显式安装配置中使用的 nobody 用户和 daemon 组。
+			zypper -n install system-user-nobody system-user-daemon tar xz meson ninja libprotobuf-c-devel gnutls gcc make vim net-tools pkg-config gnutls-devel libseccomp-devel libev-devel libnl3-devel readline-devel liblz4-devel ca-certificates wget iproute2 procps iptables openssl ipcalc
 			;;
 		*)
 			echo -e "${Error} 未识别的包管理器，无法安装依赖 !" && exit 1 ;;

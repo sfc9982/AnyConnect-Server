@@ -262,7 +262,8 @@ Installation_dependency(){
             pacman -Syu --noconfirm tar xz meson ninja protobuf-c base-devel vim net-tools gnutls libseccomp libev libnl readline ca-certificates wget iproute2 procps-ng iptables openssl lz4 ipcalc
             ;;
         zypper)
-            zypper -n install tar xz meson ninja libprotobuf-c-devel gnutls gcc make vim net-tools pkg-config gnutls-devel libseccomp-devel libev-devel libnl3-devel readline-devel liblz4-devel ca-certificates wget iproute2 procps iptables openssl ipcalc
+            # Minimal SUSE images need the nobody user and daemon group used by ocserv.conf.
+            zypper -n install system-user-nobody system-user-daemon tar xz meson ninja libprotobuf-c-devel gnutls gcc make vim net-tools pkg-config gnutls-devel libseccomp-devel libev-devel libnl3-devel readline-devel liblz4-devel ca-certificates wget iproute2 procps iptables openssl ipcalc
             ;;
         *)
             echo -e "${Error} Unknown package manager, cannot install dependencies !" && exit 1 ;;
