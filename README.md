@@ -187,6 +187,13 @@ A: Back up the entire `/etc/ocserv` directory (config, certificates and accounts
 **Q: How do I upgrade ocserv itself?**
 A: Menu 0 only updates the management script. To upgrade ocserv, uninstall and reinstall — back up `/etc/ocserv` first.
 
+## Tests
+
+CI includes distro smoke checks and real VPN end-to-end tests. The latter builds
+ocserv from each installer, connects with OpenConnect, verifies TCP/DTLS traffic,
+DNS and NAT, and exercises account disable/restore/delete. See
+[tests/README.md](tests/README.md) for coverage, local commands, and test boundaries.
+
 ## Credits and license
 
 - Server side is GNU ocserv; password management uses its bundled ocpasswd

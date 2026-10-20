@@ -1,0 +1,64 @@
+name: VPN end-to-end tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vpn-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vpn:
+    name: Real VPN on ${{ matrix.name }} (zh + en)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: "Ubuntu 22.04", image: "ubuntu:22.04" }
+          - { name: "Ubuntu 24.04", image: "ubuntu:24.04" }
+          - { name: "Debian 11", image: "debian:11" }
+          - { name: "Debian 12", image: "debian:12" }
+          - { name: "Fedora 40", image: "fedora:40" }
+          - { name: "Rocky 9", image: "rockylinux:9" }
+          - { name: "AlmaLinux 9", image: "almalinux:9" }
+          - { name: "Arch Linux", image: "archlinux:latest" }
+          - { name: "openSUSE Leap", image: "opensuse/leap:15" }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build ocserv and test real VPN traffic in isolated namespaces
+        env:
+          DISTRO_IMAGE: ${{ matrix.image }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/vpn-e2e-logs"
+          sudo modprobe tun
+          docker run --rm --privileged --device /dev/net/tun \
+            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
+            --volume "$RUNNER_TEMP/vpn-e2e-logs:/logs" \
+            --workdir /workspace \
+            --env VPN_E2E_DISPOSABLE=1 --env VPN_E2E_LOG_DIR=/logs \
+            "$DISTRO_IMAGE" bash -c \
+            'set -e; for script in ocserv.sh ocserv-en.sh; do
+              bash tests/vpn-install.sh "$script"
+              bash tests/vpn-e2e.sh "$script"
+            done'
+
+      - name: Upload diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vpn-e2e-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/vpn-e2e-logs
+          if-no-files-found: ignore
+          retention-days: 7
