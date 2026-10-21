@@ -4,7 +4,7 @@
 
 One-click deployment of an **SSL VPN server compatible with the official Cisco AnyConnect client** on Linux. Once deployed, phones and computers connect using Cisco's official AnyConnect client — no third-party app required.
 
-- Server: ocserv 1.3.0 (the official OpenConnect server implementation, compiled from source into /usr/local)
+- Server: ocserv 1.5.0 (the official OpenConnect server implementation, compiled from source into /usr/local)
 - Client: the official Cisco AnyConnect client (Windows / macOS / Android / iOS / Linux)
 - Accounts: client certificate + password, two independent channels; deleting a user permanently revokes the certificate, suspension can be lifted at any time
 - Auth and revocation changes take effect immediately — no service restart needed
@@ -69,11 +69,11 @@ When the installation finishes, the script prints your server info. The address 
 
 ## What the installer does
 
-Steps run in order; if any step fails, changes are rolled back automatically:
+Steps run in order; installation stops when a required step fails:
 
 1. Detect the OS and TUN/TAP
 2. Install build dependencies (gnutls, libev, seccomp, libnl, ...) plus iptables and openssl
-3. Download the ocserv 1.3.0 source from the official site and compile it
+3. Download the ocserv 1.5.0 source from the official site and compile it with Meson and Ninja
 4. Generate a self-signed CA and server certificate (bound to your IP)
 5. Generate the CRL and enable "certificate first, password fallback" authentication
 6. Create the first account (certificate and password together)
@@ -186,6 +186,17 @@ A: Back up the entire `/etc/ocserv` directory (config, certificates and accounts
 
 **Q: How do I upgrade ocserv itself?**
 A: Menu 0 only updates the management script. To upgrade ocserv, uninstall and reinstall — back up `/etc/ocserv` first.
+
+## Tests
+
+CI includes distro smoke checks and real VPN end-to-end tests. The latter builds
+ocserv from each installer, connects with OpenConnect, verifies TCP/DTLS traffic,
+DNS and NAT, and exercises account disable/restore/delete and saved-session
+cookie invalidation. See
+[tests/README.md](tests/README.md) for coverage, local commands, and test boundaries.
+Fault-injection and concurrent-account checks cover interrupted operations and
+safe retries. The traffic fixture uses production helpers and starts the daemon
+directly; systemd boot behavior is outside this suite.
 
 ## Credits and license
 

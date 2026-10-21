@@ -18,11 +18,16 @@ jobs:
           bash -n ocserv.sh
           bash -n ocserv-en.sh
           bash -n tests/smoke.sh
+          for script in tests/*.sh; do bash -n "$script"; done
+          python3 -m py_compile tests/vpn-target.py
+
+      - name: Installer control-flow regressions
+        run: bash tests/installer-regressions.sh
 
       - name: ShellCheck (error level)
         run: |
           shellcheck --version
-          shellcheck -S error ocserv.sh ocserv-en.sh tests/smoke.sh
+          shellcheck -S error ocserv.sh ocserv-en.sh tests/*.sh
 
       - name: Guard no plaintext transport / third-party script download
         run: |

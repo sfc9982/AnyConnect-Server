@@ -4,7 +4,7 @@
 
 在 Linux 服务器上一键部署**与 Cisco AnyConnect 官方客户端兼容的 SSL VPN**。部署完成后，手机和电脑直接使用思科官方的 AnyConnect 客户端即可连接，无需安装任何第三方 App。
 
-- 服务端：ocserv 1.3.0（OpenConnect 官方服务端实现，源码编译安装至 /usr/local）
+- 服务端：ocserv 1.5.0（OpenConnect 官方服务端实现，源码编译安装至 /usr/local）
 - 客户端：Cisco AnyConnect 官方客户端（Windows / macOS / Android / iOS / Linux）
 - 账号体系：客户端证书 + 账号密码双通道；删除用户即永久吊销证书，临时禁用可随时恢复
 - 认证与吊销变更实时生效，无需重启服务
@@ -69,11 +69,11 @@ bash ocserv.sh
 
 ## 安装过程做了什么
 
-按顺序执行，任一步骤失败会自动清理已更改的内容：
+按顺序执行，必要步骤失败时停止安装：
 
 1. 检测系统与 TUN/TAP
 2. 安装编译依赖（gnutls、libev、seccomp、libnl 等）及 iptables、openssl
-3. 从官方网站下载 ocserv 1.3.0 源码，编译安装
+3. 从官方网站下载 ocserv 1.5.0 源码，通过 Meson 和 Ninja 编译安装
 4. 生成自签名 CA 与服务器证书（服务器证书绑定你的 IP）
 5. 生成证书吊销列表（CRL），启用「证书优先 + 密码兜底」认证
 6. 创建第一个账号（证书 + 密码同时生成）
@@ -186,6 +186,16 @@ A：备份整个 `/etc/ocserv` 目录即可（含配置、证书与账号）。
 
 **Q：如何升级 ocserv 本身？**
 A：本菜单的「升级脚本」只更新管理脚本。升级 ocserv 需先卸载再重装，卸载前请备份 `/etc/ocserv`。
+
+## 测试
+
+CI 包含发行版 smoke 检查和真实 VPN 端到端测试。后者会在九个发行版中分别通过
+中英文安装脚本编译 ocserv，使用 OpenConnect 建立 TCP/DTLS 隧道，验证地址、路由、
+数据完整性、DNS 与 NAT，并检查账号禁用、恢复、删除及旧会话 cookie 作废。
+测试使用独立的客户端、服务端和目标网络空间，无需生产 VPN 账号。
+完整覆盖范围、本地运行命令和测试边界见 [tests/README.md](tests/README.md)。
+故障注入与账户并发测试还会检查操作中断后的状态和重试行为。流量测试调用生产辅助
+函数并直接启动守护进程；systemd 开机启动行为不在这套测试的验证范围内。
 
 ## 致谢与许可
 
