@@ -20,8 +20,19 @@ client_pids=(); server_pid=''; metrics_pid=''; target_pid=''
 fail() { failure_reason="$*"; echo "FAIL: $*" >&2; exit 1; }
 cleanup() {
     local rc=$? ns pid
-    trap - EXIT
+    trap - EXIT ERR
     set +e
+    # Capture the live failure BEFORE teardown adds misleading reconnect errors.
+    if ((rc != 0)); then
+        python3 "$repo/tests/qualification/diagnostics.py" "$state" "$logs"
+        for ns in "${ns_list[@]}"; do
+            { ip -n "$ns" addr; ip -n "$ns" route; ip -n "$ns" -6 route;
+              ip netns exec "$ns" ss -uan;
+              ip netns exec "$ns" iptables -nvxL;
+              ip netns exec "$ns" ip6tables -nvxL;
+            } > "$logs/network-$ns.txt" 2>&1
+        done
+    fi
     touch "$state/metrics.stop"
     for ns in "${ns_list[@]}"; do
         for pid in $(ip netns pids "$ns" 2>/dev/null); do kill -TERM "$pid" 2>/dev/null; done
@@ -33,13 +44,6 @@ cleanup() {
         rm -rf "/etc/netns/$ns"
     done
     [[ -z "$metrics_pid" ]] || wait "$metrics_pid" 2>/dev/null
-    # Only these diagnostic files are uploaded; credentials and raw logs are private.
-    if ((rc != 0)); then
-        for f in "$state"/*.log; do
-            [[ -f "$f" ]] || continue
-            sed -E '/cookie|password|passwd|BEGIN .*PRIVATE KEY/I d' "$f" | tail -60 >&2
-        done
-    fi
     python3 - "$logs/status.json" "$rc" "$failure_reason" "$seconds" "$clients" <<'STATUS'
 import json, sys
 from pathlib import Path
@@ -166,7 +170,7 @@ ip netns exec "$server" ip6tables-save > "$state/rules-after"
 diff -u <(grep -v '^#' "$state/rules-before") <(grep -v '^#' "$state/rules-after")
 start_server() {
     local i
-    ip netns exec "$server" /usr/local/sbin/ocserv -f -c /etc/ocserv/ocserv.conf > "$state/server.log" 2>&1 &
+    ip netns exec "$server" /usr/local/sbin/ocserv -f --debug 2 -c /etc/ocserv/ocserv.conf > "$state/server.log" 2>&1 &
     server_pid=$!
     for ((i=0;i<100;i++)); do
         ip netns exec "$server" ss -ltn | grep -q ':4443' && return 0
@@ -186,42 +190,8 @@ stop_clients() {
     done
     client_pids=()
 }
-connect() {
-    local n=$1 outer=$2 transport=$3 label=$4 ns address i
-    probe_transport=$transport
-    ns=q-c$n-$$
-    address=198.18.0.2; [[ "$outer" != 6 ]] || address=2001:db8:1::2
-    printf '%s vpn-qualification.test\n' "$address" > "/etc/netns/$ns/hosts"
-    mkdir -p "$state/client-$n"
-    rm -f "$state/client-$n/connected"
-    local -a args=(--protocol=anyconnect --non-inter --no-proxy --no-system-trust
-        --cafile /etc/ocserv/ssl/ca-cert.pem --user "qual-$n" --passwd-on-stdin
-        --interface vpntest --reconnect-timeout 5
-        --script "exec bash $repo/tests/qualification/vpnc.sh")
-    [[ "$transport" != tls ]] || args+=(--no-dtls)
-    # Parse the actual argument vector without connecting. Unsupported client
-    # options are setup errors, never an expected policy/authentication failure.
-    # --passwd-on-stdin is processed during option parsing, before --version.
-    # Supply a dummy line for that parse-only run, never the account password.
-    openconnect "${args[@]}" --version <<< qualification-argument-check > /dev/null 2> "$state/$label-cli.log" ||
-        fail "$label unsupported OpenConnect arguments"
-    ip netns exec "$ns" env VPNC_STATE_DIR="$state/client-$n" openconnect "${args[@]}" \
-        https://vpn-qualification.test:4443/ < "$state/password-$n" > /dev/null 2> "$state/$label-$n.log" &
-    client_pids+=("$!")
-    for ((i=0;i<200;i++)); do
-        [[ -f "$state/client-$n/connected" ]] && break
-        kill -0 "${client_pids[-1]}" || fail "$label client exited"
-        sleep .1
-    done
-    [[ -f "$state/client-$n/connected" ]] || fail "$label tunnel timed out"
-    ip -n "$ns" route get 198.51.100.2 | grep -q 'dev vpntest' || fail 'IPv4 bypass'
-    ip -n "$ns" -6 route get 2001:db8:2::2 | grep -q 'dev vpntest' || fail 'IPv6 bypass'
-    ip -n "$ns" -6 addr show dev vpntest | grep -q 'fd42:7:' || fail 'missing IPv6 lease'
-    if [[ "$transport" == dtls ]]; then
-        for ((i=0;i<100;i++)); do grep -q 'Established DTLS connection' "$state/$label-$n.log" && break; sleep .1; done
-        grep -q 'Established DTLS connection' "$state/$label-$n.log" || fail 'DTLS fallback hid a failure'
-    fi
-}
+# shellcheck disable=SC1091
+source "$repo/tests/qualification/connect.sh"
 udp_accepted_bytes() {
     local n=$1
     { ip netns exec "$edge" iptables -nvxL FORWARD; ip netns exec "$edge" ip6tables -nvxL FORWARD; } |
