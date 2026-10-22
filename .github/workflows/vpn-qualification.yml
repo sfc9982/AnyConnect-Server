@@ -38,6 +38,18 @@ jobs:
           shellcheck -S error ocserv-network.sh tests/qualification/*.sh
           python3 -m compileall -q tests/qualification
           python3 tests/qualification/selftest.py
+      - name: Snapshot tracked inputs
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/qualification-source"
+          git rev-parse HEAD > "$RUNNER_TEMP/qualification-source/COMMIT"
+          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/qualification-source/source.tar.gz"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qualification-source
+          path: ${{ runner.temp }}/qualification-source
+          retention-days: 7
 
   network:
     name: Dual-stack and load (${{ matrix.image }}, ${{ matrix.installer }})
