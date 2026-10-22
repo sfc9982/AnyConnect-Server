@@ -8,7 +8,7 @@ case "$installer" in ocserv.sh|ocserv-en.sh) ;; *) exit 2 ;; esac
 seconds=${VPN_SOAK_SECONDS:-60}; clients=${VPN_SOAK_CLIENTS:-6}
 [[ $seconds =~ ^[1-9][0-9]*$ && $clients =~ ^[1-9][0-9]*$ ]] || exit 2
 ((seconds <= 7200 && clients >= 2 && clients <= 100)) || exit 2
-for cmd in ip iptables ip6tables curl dig openconnect python3 openssl; do
+for cmd in ip iptables ip6tables curl dig openconnect python3 openssl ping; do
     command -v "$cmd" >/dev/null || { echo "Missing $cmd" >&2; exit 2; }
 done
 export LC_ALL=C TERM=xterm
@@ -17,7 +17,7 @@ logs=${VPN_E2E_LOG_DIR:-/tmp/vpn-extended-results}/extended-$installer
 mkdir -p "$logs"
 edge=ve-edge-$$; server=ve-server-$$; target=ve-target-$$
 namespaces=(); workers=(); client_pids=(); client_names=(); client_modes=()
-fail() { echo "FAIL: $*" >&2; exit 1; }
+fail() { printf 'FAIL: %s\n' "$*" | tee "$logs/failure.txt" >&2; exit 1; }
 cleanup() {
     status=$?
     trap - EXIT
@@ -91,6 +91,18 @@ ip -n "$server" route add 192.0.2.0/24 via 203.0.113.1
 ip -n "$server" -6 route add fd42:10::/64 via fd42:20::1
 ip -n "$target" -6 route add fd42:70::/48 via fd42:30::1
 ip netns exec "$edge" sysctl -qw net.ipv4.ip_forward=1 net.ipv6.conf.all.forwarding=1
+# Use a real default router. A nonexistent IPv6 next hop becomes NUD_FAILED;
+# Linux can then reject the more-specific exclusion and select the tunnel's
+# usable default instead. Isolation must be enforced by ACLs, not dead gateways.
+for fw in iptables ip6tables; do
+    ip netns exec "$edge" "$fw" -P FORWARD DROP
+    if [[ $fw == iptables ]]; then endpoint=203.0.113.2; else endpoint=fd42:20::2; fi
+    for protocol in tcp udp; do
+        ip netns exec "$edge" "$fw" -A FORWARD -d "$endpoint" -p "$protocol" --dport 4443 -j ACCEPT
+        ip netns exec "$edge" "$fw" -A FORWARD -s "$endpoint" -p "$protocol" --sport 4443 \
+            -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    done
+done
 for ((i=0; i<clients; i++)); do
     c=ve-client-$i-$$; client_names+=("$c"); client_pids+=(0); client_modes+=(tls)
     new_ns "$c"; pair "$c" vc "$edge" "c$i"
@@ -103,9 +115,9 @@ for ((i=0; i<clients; i++)); do
     done
     ip -n "$edge" link set "c$i" master brc
     addr "$c" vc "192.0.2.$((i+10))/24" "fd42:10::$((i+10))/64"
-    ip -n "$c" route add default via 192.0.2.254
+    ip -n "$c" route add default via 192.0.2.1
     ip -n "$c" route add 203.0.113.2/32 via 192.0.2.1
-    ip -n "$c" -6 route add default via fd42:10::ffff
+    ip -n "$c" -6 route add default via fd42:10::1
     ip -n "$c" -6 route add fd42:20::2/128 via fd42:10::1
     mkdir -p "/etc/netns/$c" "$state/c$i"
     printf 'nameserver 192.0.2.254\n' > "/etc/netns/$c/resolv.conf"
@@ -218,6 +230,7 @@ traffic() {
 # Positive and negative controls at two distinct firewall layers.
 for i in 0 1; do
     c=${client_names[$i]}; unreachable "$c"
+    ip netns exec "$c" ping -6 -c 1 -W 2 fd42:10::1 >/dev/null || fail 'IPv6 underlay router unreachable'
     if ((i)); then fw=ip6tables; endpoint=fd42:20::2; else fw=iptables; endpoint=203.0.113.2; fi
     connect_client "$i" dtls || fail 'dual-stack DTLS connection'
     traffic "$i"
@@ -290,8 +303,8 @@ done
 for pid in "${workers[@]}"; do wait "$pid" || fail 'load worker failed integrity, UDP or timing checks'; done
 for ((i=0; i<clients; i++)); do stop_client "$i"; done
 for ((n=0; n<100; n++)); do
-    if ! ip -n "$server" -o link show | grep -q 'vpns'; then break; fi
+    if ! ip -n "$server" -o link show | grep 'vpns' >/dev/null; then break; fi
     sleep .1
 done
-! ip -n "$server" -o link show | grep -q 'vpns' || fail 'TUN interfaces leaked after disconnect'
+! ip -n "$server" -o link show | grep 'vpns' >/dev/null || fail 'TUN interfaces leaked after disconnect'
 printf 'PASS: %s concurrent clients for %s seconds; bidirectional integrity and UDP echo\n' "$clients" "$seconds"
