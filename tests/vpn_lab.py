@@ -41,6 +41,15 @@ def text(args, **kwargs):
     return run(args, **kwargs).stdout.decode().strip()
 
 
+def version_line(command):
+    # ocserv writes --version to stderr, OpenConnect uses stdout.
+    result = run([command, "--version"])
+    lines = (result.stdout + result.stderr).decode(errors="replace").strip().splitlines()
+    if not lines:
+        raise RuntimeError(f"{command} --version produced no version output")
+    return lines[0]
+
+
 def wait_for(predicate, seconds, description):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
@@ -121,7 +130,7 @@ class Client:
         args += ["https://vpn-server.test:4443/"]
         env = dict(os.environ, VPNC_REAL_SCRIPT=self.lab.vpnc, VPNC_STATE_DIR=str(self.state))
         with self.log.open("wb") as log:
-            self.process = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+            self.process = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=log,
                                             stderr=log, env=env)
         self.process.stdin.write((self.lab.password + "\n").encode() if password else b"\n")
         self.process.stdin.close()
@@ -294,7 +303,7 @@ class Lab:
         self.daemon = server
         self.processes.append(server)
         wait_for(lambda: ":4443" in text(["ss", "-Hltn"], ns=self.server), 20, "ocserv listener")
-        self.report["versions"] = {name: text([name, "--version"]).splitlines()[0]
+        self.report["versions"] = {name: version_line(name)
                                    for name in ("openconnect", "/usr/local/sbin/ocserv")}
         self.report["os_release"] = Path("/etc/os-release").read_text()
         self.passed("IPv4/IPv6 forwarding persisted; firewall rules idempotent; no pre-tunnel target access")

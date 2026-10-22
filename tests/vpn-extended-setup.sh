@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fixture provisioning; this is NOT an assertion that the default installer enables IPv6.
+# Fixture supplies a routed IPv6 prefix; production helpers install all firewall rules.
 set -uo pipefail
 [[ ${VPN_E2E_DISPOSABLE:-} == 1 && $EUID == 0 ]] || exit 2
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -7,6 +7,7 @@ installer=${1:?}; state=${2:?}; clients=${3:?}
 case "$installer" in ocserv.sh|ocserv-en.sh) ;; *) exit 2 ;; esac
 # shellcheck disable=SC1090
 source "$repo/$installer"
+: "${conf_file:?}" "${conf:?}" "${passwd_file:?}" "${file:?}"
 check_sys
 mkdir -p "$conf_file" || exit 1
 cp "$repo/ocserv.conf" "$conf" || exit 1
@@ -29,12 +30,10 @@ for ((i=0; i<clients; i++)); do
         ocpasswd -c "$passwd_file" -- "load-$i" || exit 1
 done
 chmod 600 "$passwd_file" || exit 1
+# Require the real IPv6 helper to open the routed path under a deny policy.
+# The lab supplies the upstream return route, never NAT66 or test-only ACCEPT rules.
+ip6tables -P FORWARD DROP || exit 1
 Set_iptables || exit 1
 Add_iptables 4443 4443 || exit 1
-# IPv6 routing is explicit fixture infrastructure. No NAT66 or global firewall flush.
-sysctl -qw net.ipv6.conf.all.forwarding=1 || exit 1
-ip6tables -P FORWARD DROP || exit 1
-ip6tables -A FORWARD -i 'vpns+' -s fd42:70::/48 -o ve -j ACCEPT || exit 1
-ip6tables -A FORWARD -i ve -o 'vpns+' -d fd42:70::/48 \
-    -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT || exit 1
+Save_iptables || exit 1
 "$file" --test-config -c "$conf" || exit 1

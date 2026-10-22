@@ -47,6 +47,18 @@ case "$action" in
         cleanup() {
             local status=$?
             trap - EXIT
+            if ((status != 0)) && [[ -f "$state/client.log" ]]; then
+                # Synthetic guest identity only; never print private cookies or passwords.
+                python3 - "$state" <<'PYDIAG'
+import re, sys
+from pathlib import Path
+p = Path(sys.argv[1])
+s = (p / 'client.log').read_text(errors='replace').replace((p / 'password').read_text().strip(), '<redacted>')
+for line in s.splitlines()[-80:]:
+    if not re.search(r'cookie|session-token|authorization|password|PRIVATE KEY', line, re.I):
+        print(line, file=sys.stderr)
+PYDIAG
+            fi
             if [[ -n "$client_pid" ]]; then
                 kill -INT "$client_pid" 2>/dev/null || true
                 for ((i=0;i<30;i++)); do
@@ -90,7 +102,7 @@ case "$action" in
         ip netns exec "$ns" iptables -A BOOT_UDP -j RETURN
         ip netns exec "$ns" iptables -A INPUT -p udp --sport 4443 -j BOOT_UDP
         ip netns exec "$ns" "${args[@]}" https://192.0.2.1:4443/ < "$state/password" \
-            > /dev/null 2> "$state/client.log" &
+            > "$state/client.log" 2>&1 &
         client_pid=$!
         for ((i=0;i<150;i++)); do
             [[ -f "$VPNC_STATE_DIR/connected" ]] && break

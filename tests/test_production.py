@@ -11,8 +11,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from vpn_lab import redact, stop_process, wait_for
+from vpn_lab import redact, stop_process, wait_for, version_line
 
 spec = importlib.util.spec_from_file_location("target", Path(__file__).with_name("vpn-target.py"))
 target = importlib.util.module_from_spec(spec)
@@ -25,6 +26,16 @@ def question(kind=1, name="vpn-test.internal"):
 
 
 class ProductionTests(unittest.TestCase):
+    def test_version_output_on_either_stream(self):
+        for stdout, stderr in ((b'OpenConnect 9.12\n', b''),
+                               (b'', b'OpenConnect VPN Server 1.5.0\n')):
+            with self.subTest(stdout=stdout), patch('vpn_lab.run', return_value=
+                    subprocess.CompletedProcess([], 0, stdout, stderr)):
+                self.assertEqual(version_line('test-client'), (stdout + stderr).decode().strip())
+        with patch('vpn_lab.run', return_value=subprocess.CompletedProcess([], 0, b'', b'')):
+            with self.assertRaisesRegex(RuntimeError, 'no version output'):
+                version_line('test-client')
+
     def test_dns_records_and_failure_codes(self):
         address = ipaddress.ip_address("198.51.100.2")
         address6 = ipaddress.ip_address("fd42:2::2")

@@ -24,7 +24,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-accel=(-accel tcg,thread=multi -cpu max)
+accel=(-accel "tcg,thread=multi" -cpu max)
 if [[ -c /dev/kvm ]]; then accel=(-enable-kvm -cpu host); fi
 printf '%s\n' "${accel[*]}" > "$logs/acceleration.txt"
 image=noble-server-cloudimg-amd64.img

@@ -88,7 +88,7 @@ def probe(cfg):
         with tempfile.TemporaryDirectory(prefix='vpn-probe-') as temp:
             log = Path(temp, 'client.log')
             with log.open('wb') as output:
-                proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=output)
+                proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=output, stderr=output)
                 proc.stdin.write(password)
                 proc.stdin.close()
                 deadline = time.monotonic() + 40

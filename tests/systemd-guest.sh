@@ -7,6 +7,7 @@ installer=${1:?}; action=${2:?}; identity=${3:?}
 case "$installer" in ocserv.sh|ocserv-en.sh) ;; *) exit 2 ;; esac
 # shellcheck disable=SC1090
 source "$repo/$installer"
+: "${passwd_file:?}"
 export TERM=xterm LC_ALL=C
 state=/root/vpn-systemd-fixture
 normalize() { sed -E '/^#/d; s/\[[0-9]+:[0-9]+\]/[0:0]/g'; }
@@ -17,7 +18,7 @@ case "$action" in
         mkdir -m 700 "$state"
         # Dependency acquisition, build, accounts, unit install, firewall and startup
         # all go through the real installer; only public-address discovery is deterministic.
-        Get_ip() { ip=$identity; }
+        export OCSERV_SERVER_IDENTITY=$identity
         check_sys
         modprobe tun
         printf 'net.ipv4.ip_forward=0\n' >> /etc/sysctl.conf

@@ -86,6 +86,7 @@ pair "$server" ve "$target" vt
 addr "$server" ve 198.51.100.1/24 fd42:30::1/64
 addr "$target" vt 198.51.100.2/24 fd42:30::2/64
 ip -n "$server" route add default via 198.51.100.2
+ip -n "$server" -6 route add default via fd42:30::2
 ip -n "$server" route add 192.0.2.0/24 via 203.0.113.1
 ip -n "$server" -6 route add fd42:10::/64 via fd42:20::1
 ip -n "$target" -6 route add fd42:70::/48 via fd42:30::1
@@ -148,7 +149,7 @@ connect_client() {
         --no-system-trust --cafile /etc/ocserv/ssl/ca-cert.pem --user "load-$i" \
         --passwd-on-stdin --interface vpntest --reconnect-timeout 5 --mtu 1280 \
         --script "exec bash $repo/tests/vpn-vpnc.sh" "${extra[@]}" \
-        https://vpn-fixture.invalid:4443/ < "$state/password" > /dev/null 2> "$state/c$i/client.log" &
+        https://vpn-fixture.invalid:4443/ < "$state/password" > "$state/c$i/client.log" 2>&1 &
     client_pids[$i]=$!
     for ((n=0; n<200; n++)); do
         [[ -e $state/c$i/connected ]] && break
