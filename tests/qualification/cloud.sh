@@ -87,7 +87,9 @@ udp_bytes() {
     { iptables -nvxL CLOUD_UDP; ip6tables -nvxL CLOUD_UDP; } |
         awk '$3 == "RETURN" {n += $2} END {printf "%.0f\n", n}'
 }
-openconnect "${args[@]}" "$VPN_CLOUD_SERVER" < "$state/password" > /dev/null 2> "$state/client.log" &
+# DTLS progress is on stdout unless cookie output is explicitly requested.
+# Keep both streams private; no authentication cookie is printed or uploaded.
+openconnect "${args[@]}" "$VPN_CLOUD_SERVER" < "$state/password" > "$state/client.log" 2>&1 &
 client_pid=$!
 for ((i=0;i<300;i++)); do
     [[ -f "$state/connected" ]] && break

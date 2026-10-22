@@ -20,8 +20,10 @@ connect() {
     # Supply a dummy line for that parse-only run, never the account password.
     openconnect "${args[@]}" --version <<< qualification-argument-check > /dev/null 2> "$state/$label-cli.log" ||
         fail "$label unsupported OpenConnect arguments"
+    # Without --printcookie, OpenConnect writes INFO (including DTLS success)
+    # to stdout and errors to stderr. Capture both in the private log.
     ip netns exec "$ns" env VPNC_STATE_DIR="$state/client-$n" openconnect "${args[@]}" \
-        https://vpn-qualification.test:4443/ < "$state/password-$n" > /dev/null 2> "$state/$label-$n.log" &
+        https://vpn-qualification.test:4443/ < "$state/password-$n" > "$state/$label-$n.log" 2>&1 &
     client_pids+=("$!")
     for ((i=0;i<200;i++)); do
         [[ -f "$state/client-$n/connected" ]] && break
