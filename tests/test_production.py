@@ -15,7 +15,7 @@ import unittest
 import urllib.error
 from unittest.mock import patch
 
-from vpn_lab import redact, stop_process, wait_for, version_line
+from vpn_lab import redact, stop_process, wait_for, version_line, V6_ENDPOINT, V6_CLIENT_NET
 
 spec = importlib.util.spec_from_file_location("target", Path(__file__).with_name("vpn-target.py"))
 target = importlib.util.module_from_spec(spec)
@@ -31,6 +31,9 @@ def question(kind=1, name="vpn-test.internal"):
 
 
 class ProductionTests(unittest.TestCase):
+    def test_ipv6_endpoint_is_not_on_the_client_link(self):
+        self.assertNotIn(ipaddress.ip_address(V6_ENDPOINT), V6_CLIENT_NET)
+
     def test_external_preflight_rejects_reachable_http(self):
         for code in (301, 401, 404, 500):
             with patch.object(probe, 'download', side_effect=urllib.error.HTTPError(

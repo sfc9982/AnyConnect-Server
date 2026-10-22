@@ -25,6 +25,10 @@ ROOT = Path(__file__).resolve().parent.parent
 V4_TARGET = "198.51.100.2"
 V6_TARGET = "fd42:2::2"
 V6_POOL = ipaddress.ip_network("fd42:7::/48")
+# The public endpoint must not look on-link to the clients. vpnc-script
+# considers every matching underlay route when pinning its gateway exception.
+V6_ENDPOINT = "fd42:4::1"
+V6_CLIENT_NET = ipaddress.ip_network("fd42:1::/64")
 
 
 def run(args, ns=None, check=True, timeout=30, **kwargs):
@@ -93,7 +97,7 @@ class Client:
         lab.address(self.ns, "vc", f"192.0.2.{number+2}/24", f"fd42:1::{number+2:x}/64")
         lab.ip(self.ns, "route", "add", "192.0.2.1/32", "via", "192.0.2.254")
         lab.ip(self.ns, "route", "add", "default", "via", "192.0.2.253")
-        lab.ip(self.ns, "-6", "route", "add", "fd42:1::1/128", "via", "fd42:1::fe")
+        lab.ip(self.ns, "-6", "route", "add", "fd42:4::1/128", "via", "fd42:1::fe")
         lab.ip(self.ns, "-6", "route", "add", "default", "via", "fd42:1::fd")
         netdir = Path("/etc/netns") / self.ns
         netdir.mkdir(parents=True)
@@ -107,7 +111,7 @@ class Client:
         # Stock vpnc-script removes its gateway exception on disconnect.
         # Restore only the declared underlay endpoints, never inner target routes.
         self.lab.ip(self.ns, "route", "replace", "192.0.2.1/32", "via", "192.0.2.254")
-        self.lab.ip(self.ns, "-6", "route", "replace", "fd42:1::1/128", "via", "fd42:1::fe")
+        self.lab.ip(self.ns, "-6", "route", "replace", "fd42:4::1/128", "via", "fd42:1::fe")
 
     def counter(self):
         tool = "ip6tables" if self.family == 6 else "iptables"
@@ -121,7 +125,7 @@ class Client:
         for filename in ("connected", "address", "address6", "dns", "dns6"):
             if (self.state / filename).exists():
                 (self.state / filename).unlink()
-        endpoint = "fd42:1::1" if family == 6 else "192.0.2.1"
+        endpoint = V6_ENDPOINT if family == 6 else "192.0.2.1"
         (Path("/etc/netns") / self.ns / "hosts").write_text(f"127.0.0.1 localhost\n{endpoint} vpn-server.test\n")
         args = ["ip", "netns", "exec", self.ns, "openconnect", "--protocol=anyconnect",
                 "--non-inter", "--no-proxy", "--no-system-trust", "--cafile", str(self.lab.state / "ca.pem"),
@@ -151,10 +155,16 @@ class Client:
             wait_for(lambda: "Established DTLS connection" in self.log.read_text(errors="replace"),
                      20, "real DTLS negotiation")
         if family == 6:
-            if not re.search(r"\[?fd42:1::1\]?:4443", text(["ss", "-Htn"], ns=self.ns)):
+            if not re.search(r"\[?fd42:4::1\]?:4443", text(["ss", "-Htn"], ns=self.ns)):
                 raise RuntimeError("IPv6 server connection fell back to IPv4")
 
     def check_routes(self):
+        # Check the transport path as well as the inner routes: a tunnel can
+        # authenticate before vpnc-script accidentally makes its peer on-link.
+        if self.family == 6:
+            outer = text(["ip", "-6", "route", "get", V6_ENDPOINT], ns=self.ns)
+            if "via fd42:1::fe dev vc" not in outer:
+                raise RuntimeError(f"IPv6 VPN endpoint lost its routed underlay: {outer}")
         for target, family in ((V4_TARGET, "-4"), (V6_TARGET, "-6")):
             if "dev vpntest" not in text(["ip", family, "route", "get", target], ns=self.ns):
                 raise RuntimeError(f"{target} does not use the VPN interface")
@@ -277,9 +287,9 @@ class Lab:
         self.link(self.server, "wan", self.edge, "to-server")
         self.address(self.server, "wan", "198.18.0.1/24", "fd42:3::1/64")
         self.address(self.edge, "to-server", "198.18.0.254/24", "fd42:3::fe/64")
-        self.address(self.server, "lo", "192.0.2.1/32", "fd42:1::1/128")
+        self.address(self.server, "lo", "192.0.2.1/32", "fd42:4::1/128")
         self.ip(self.edge, "route", "add", "192.0.2.1/32", "via", "198.18.0.1")
-        self.ip(self.edge, "-6", "route", "add", "fd42:1::1/128", "via", "fd42:3::1")
+        self.ip(self.edge, "-6", "route", "add", "fd42:4::1/128", "via", "fd42:3::1")
         self.ip(self.server, "route", "add", "192.0.2.0/24", "via", "198.18.0.254")
         self.ip(self.server, "-6", "route", "add", "fd42:1::/64", "via", "fd42:3::fe")
         self.link(self.server, "ve", self.target, "vt")
@@ -318,7 +328,7 @@ class Lab:
         self.passed("IPv4/IPv6 forwarding persisted; firewall rules idempotent; no pre-tunnel target access")
 
     def profile(self, name):
-        for family, tool, destination in ((4, "iptables", "192.0.2.1"), (6, "ip6tables", "fd42:1::1")):
+        for family, tool, destination in ((4, "iptables", "192.0.2.1"), (6, "ip6tables", "fd42:4::1")):
             run([tool, "-F", "FORWARD"], ns=self.edge)
             run([tool, "-P", "FORWARD", "DROP"], ns=self.edge)
             if name == "no-ipv6" and family == 6:
@@ -338,7 +348,7 @@ class Lab:
 
     def tcp_blocked(self, family):
         self.clients[0].endpoint_routes()
-        address = "fd42:1::1" if family == 6 else "192.0.2.1"
+        address = V6_ENDPOINT if family == 6 else "192.0.2.1"
         probe = ("import socket,sys; s=socket.socket(socket.AF_INET6 if ':' in sys.argv[1] else socket.AF_INET); "
                  "s.settimeout(2); sys.exit(0 if s.connect_ex((sys.argv[1],4443)) else 1)")
         run(["python3", "-c", probe, address], ns=self.clients[0].ns)
