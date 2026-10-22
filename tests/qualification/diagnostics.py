@@ -11,7 +11,7 @@ SENSITIVE = re.compile(r"cookie|password|passwd|secret|session|authorization|cer
 def transport_lines(text: str) -> list[str]:
     return [line for line in text.splitlines()
             if INTERESTING.search(line) and not SENSITIVE.search(line)
-            and not re.match(r"^\s*[<>]", line)][:120]
+            and not re.match(r"^\s*(?:[<>]|X-(?:CSTP|DTLS)(?:12)?-)", line)][:120]
 
 
 def main() -> None:

@@ -72,7 +72,11 @@ jobs:
       - name: Run isolated network qualification
         run: |
           mkdir -p "$RUNNER_TEMP/qualification-logs"
-          sudo modprobe tun
+          # Minimal distro containers cannot load modules for the host kernel.
+          # Load legacy IPv6 filter/NAT support before Rocky's ip6tables runs.
+          for module in tun iptable_filter iptable_nat ip6table_filter ip6table_nat; do
+            sudo modprobe "$module"
+          done
           docker run --rm --privileged --device /dev/net/tun \
             -v "$GITHUB_WORKSPACE:/workspace:ro" \
             -v "$RUNNER_TEMP/qualification-logs:/logs" -w /workspace \
@@ -104,7 +108,11 @@ jobs:
       - name: Run isolated network qualification
         run: |
           mkdir -p "$RUNNER_TEMP/qualification-logs"
-          sudo modprobe tun
+          # Minimal distro containers cannot load modules for the host kernel.
+          # Load legacy IPv6 filter/NAT support before Rocky's ip6tables runs.
+          for module in tun iptable_filter iptable_nat ip6table_filter ip6table_nat; do
+            sudo modprobe "$module"
+          done
           docker run --rm --privileged --device /dev/net/tun \
             -v "$GITHUB_WORKSPACE:/workspace:ro" \
             -v "$RUNNER_TEMP/qualification-logs:/logs" -w /workspace \

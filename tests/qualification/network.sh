@@ -283,7 +283,7 @@ connect 0 6 dtls stateless; probe 0 stateless 1 6; stop_clients
 edge_policy udp-blocked
 connect 0 4 fallback udp-blocked; probe 0 udp-blocked 1 4
 ip netns exec "$edge" iptables -nvxL FORWARD > "$logs/udp-blocked-counters.txt"
-awk '$3 == "DROP" && $4 == "udp" {n += $1} END {exit !(n > 0)}' "$logs/udp-blocked-counters.txt" ||
+awk '$3 == "DROP" && $(NF-1) == "blocked-udp" {n += $1} END {exit !(n > 0)}' "$logs/udp-blocked-counters.txt" ||
     fail 'UDP fallback was not preceded by a real blocked DTLS attempt'
 ! grep -q 'Established DTLS connection' "$state/udp-blocked-0.log" || fail 'blocked UDP still established DTLS'
 stop_clients

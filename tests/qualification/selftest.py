@@ -22,6 +22,11 @@ target = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(target)
 
 
+spec = importlib.util.spec_from_file_location('diagnostics', ROOT / 'diagnostics.py')
+diagnostics = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(diagnostics)
+
+
 class FixtureTests(unittest.TestCase):
     def test_integrity_ipv4_ipv6_and_corruption(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -95,6 +100,27 @@ class FixtureTests(unittest.TestCase):
         self.assertIsNone(traffic.quantile([0, 0], .95))
         self.assertIsNone(traffic.quantile([0] * 2000 + [1], .95))
         self.assertEqual(traffic.quantile([1, 0, 1], .95), .03)
+
+    def test_udp_drop_counter_formats(self):
+        # Exercise the exact parser used by the network test, with both the
+        # nft numeric-protocol output and legacy symbolic-protocol output.
+        line = next(line for line in (ROOT / 'network.sh').read_text().splitlines()
+                    if line.startswith("awk '") and 'blocked-udp' in line)
+        program = line.split("'")[1]
+        for protocol in ('udp', '17'):
+            for packets, expected in ((4, 0), (0, 1)):
+                row = (f'{packets} 784 DROP {protocol} -- * * 0.0.0.0/0 '
+                       '0.0.0.0/0 /* blocked-udp */\n')
+                result = subprocess.run(['awk', program], input=row, text=True,
+                                        capture_output=True, timeout=2)
+                self.assertEqual(result.returncode, expected)
+
+    def test_transport_diagnostics_exclude_secrets_and_route_noise(self):
+        lines = ['Established DTLS connection', 'Failed TLS handshake',
+                 'DTLS password sentinel', 'DTLS session ID sentinel',
+                 'X-DTLS-Master-Secret: sentinel', '< DTLS token sentinel',
+                 'X-CSTP-Split-Exclude: 192.0.2.0/24']
+        self.assertEqual(diagnostics.transport_lines('\n'.join(lines)), lines[:2])
 
 
 if __name__ == '__main__':
