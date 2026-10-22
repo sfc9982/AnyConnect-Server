@@ -13,10 +13,11 @@ state=$(mktemp -d /tmp/vpn-qualification.XXXXXX)
 logs=${VPN_E2E_LOG_DIR:-/tmp/vpn-qualification-logs}/qualification-$installer
 mkdir -p "$logs"
 chmod 700 "$state"
+failure_reason="unexpected command failure"
 server=q-s-$$; edge=q-e-$$; target=q-t-$$
 ns_list=("$server" "$edge" "$target")
 client_pids=(); server_pid=''; metrics_pid=''; target_pid=''
-fail() { echo "FAIL: $*" >&2; exit 1; }
+fail() { failure_reason="$*"; echo "FAIL: $*" >&2; exit 1; }
 cleanup() {
     local rc=$? ns pid
     trap - EXIT
@@ -39,6 +40,14 @@ cleanup() {
             sed -E '/cookie|password|passwd|BEGIN .*PRIVATE KEY/I d' "$f" | tail -60 >&2
         done
     fi
+    python3 - "$logs/status.json" "$rc" "$failure_reason" "$seconds" "$clients" <<'STATUS'
+import json, sys
+from pathlib import Path
+path, rc, reason, duration, clients = sys.argv[1:]
+Path(path).write_text(json.dumps({"exit_code": int(rc), "passed": int(rc) == 0,
+    "reason": reason if int(rc) else "all assertions completed",
+    "requested_soak_seconds": int(duration), "requested_clients": int(clients)}, indent=2) + "\n")
+STATUS
     rm -rf "$state"
     exit "$rc"
 }
@@ -100,7 +109,7 @@ ip -n "$target" -6 route add fd42:7::/64 via 2001:db8:2::1
 ip netns exec "$edge" sysctl -qw net.ipv4.ip_forward=1 net.ipv6.conf.all.forwarding=1
 # The edge has no permitted forwarding path to either inner target.
 edge_policy() {
-    local policy=$1 tool family srv subnet
+    local policy=$1 tool family srv subnet n client
     for family in 4 6; do
         tool=iptables; srv=198.18.0.2; subnet=192.0.2.0/24
         if [[ "$family" == 6 ]]; then tool=ip6tables; srv=2001:db8:1::2; subnet=2001:db8:c::/64; fi
@@ -116,6 +125,14 @@ edge_policy() {
         if [[ "$policy" == udp-blocked ]]; then
             ip netns exec "$edge" "$tool" -A FORWARD -p udp -m comment --comment blocked-udp -j DROP
         fi
+        # Counter-only rules identify each outer flow; another busy client must
+        # never hide a silent DTLS-to-TLS fallback in the sustained workload.
+        for ((n=0; n<clients; n++)); do
+            client="192.0.2.$((10+n))"
+            [[ "$family" != 6 ]] || client="2001:db8:c::$((10+n))"
+            ip netns exec "$edge" "$tool" -A FORWARD -s "$client" -d "$srv" \
+                -p udp --dport 4443 -m comment --comment "qualification-udp-$n"
+        done
         for protocol in tcp udp; do
             ip netns exec "$edge" "$tool" -A FORWARD -s "$subnet" -d "$srv" -p "$protocol" --dport 4443 -j ACCEPT
         done
@@ -176,9 +193,13 @@ connect() {
     rm -f "$state/client-$n/connected"
     local -a args=(--protocol=anyconnect --non-inter --no-proxy --no-system-trust
         --cafile /etc/ocserv/ssl/ca-cert.pem --user "qual-$n" --passwd-on-stdin
-        --interface vpntest --reconnect-timeout 5 --dtls-attempt-period 3
+        --interface vpntest --reconnect-timeout 5
         --script "exec bash $repo/tests/qualification/vpnc.sh")
     [[ "$transport" != tls ]] || args+=(--no-dtls)
+    # Parse the actual argument vector without connecting. Unsupported client
+    # options are setup errors, never an expected policy/authentication failure.
+    openconnect "${args[@]}" --version > /dev/null 2> "$state/$label-cli.log" ||
+        fail "$label unsupported OpenConnect arguments"
     ip netns exec "$ns" env VPNC_STATE_DIR="$state/client-$n" openconnect "${args[@]}" \
         https://vpn-qualification.test:4443/ < "$state/password-$n" > /dev/null 2> "$state/$label-$n.log" &
     client_pids+=("$!")
@@ -197,12 +218,13 @@ connect() {
     fi
 }
 udp_accepted_bytes() {
+    local n=$1
     { ip netns exec "$edge" iptables -nvxL FORWARD; ip netns exec "$edge" ip6tables -nvxL FORWARD; } |
-        awk '$3 == "ACCEPT" && $4 == "udp" {s += $2} END {printf "%.0f\n", s}'
+        awk -v marker="qualification-udp-$n" '$NF == "*/" && $(NF-1) == marker {s += $2} END {printf "%.0f\n", s}'
 }
 probe() {
     local n=$1 label=$2 duration=$3 family=$4 ns url peer before after
-    before=$(udp_accepted_bytes)
+    before=$(udp_accepted_bytes "$n")
     ns=q-c$n-$$
     url=http://198.51.100.2:8080; peer=198.51.100.1
     if [[ "$family" == 6 ]]; then
@@ -213,7 +235,7 @@ probe() {
     ip netns exec "$ns" python3 "$repo/tests/qualification/traffic.py" --url "$url" \
         --payload "$state/payload" --seconds "$duration" --workers 2 --expected-peer "$peer" \
         --output "$logs/$label-$n-v$family.json"
-    after=$(udp_accepted_bytes)
+    after=$(udp_accepted_bytes "$n")
     if [[ "${probe_transport:-}" == dtls ]]; then
         ((after - before > 1048576)) || fail "DTLS negotiated but payload used TCP"
     elif [[ "${probe_transport:-}" == tls ]]; then
@@ -257,14 +279,20 @@ for outer in 4 6; do
     done
 done
 # Sustained load is simultaneous across separate authenticated client namespaces.
-for ((n=0;n<clients;n++)); do connect "$n" "$((n%2==0 ? 4 : 6))" dtls soak; done
+soak_transports=()
+for ((n=0;n<clients;n++)); do
+    transport=tls; ((n%2 == 0)) || transport=dtls
+    soak_transports+=("$transport")
+    connect "$n" "$((n%2==0 ? 4 : 6))" "$transport" soak
+done
 python3 "$repo/tests/qualification/metrics.py" --pid "$server_pid" --stop "$state/metrics.stop" \
     --output "$logs/resources.jsonl" & metrics_pid=$!
 ip -n "$server" link set ve mtu 1280
 ip -n "$target" link set vt mtu 1280
 load_pids=()
 for ((n=0;n<clients;n++)); do
-    probe "$n" soak "$seconds" "$((n%2==0 ? 4 : 6))" > "$state/load-$n.log" 2>&1 & load_pids+=("$!")
+    probe_transport="${soak_transports[$n]}" probe "$n" soak "$seconds" "$((n%2==0 ? 4 : 6))" \
+        > "$state/load-$n.log" 2>&1 & load_pids+=("$!")
 done
 load_ok=1
 for pid in "${load_pids[@]}"; do wait "$pid" || load_ok=0; done
@@ -279,6 +307,9 @@ edge_policy stateless
 connect 0 6 dtls stateless; probe 0 stateless 1 6; stop_clients
 edge_policy udp-blocked
 connect 0 4 fallback udp-blocked; probe 0 udp-blocked 1 4
+ip netns exec "$edge" iptables -nvxL FORWARD > "$logs/udp-blocked-counters.txt"
+awk '$3 == "DROP" && $4 == "udp" {n += $1} END {exit !(n > 0)}' "$logs/udp-blocked-counters.txt" ||
+    fail 'UDP fallback was not preceded by a real blocked DTLS attempt'
 ! grep -q 'Established DTLS connection' "$state/udp-blocked-0.log" || fail 'blocked UDP still established DTLS'
 stop_clients
 for policy in tcp-blocked missing-return no-ipv6; do

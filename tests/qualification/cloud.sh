@@ -71,9 +71,11 @@ done
 VPNC_REAL_SCRIPT=/usr/share/vpnc-scripts/vpnc-script
 export VPNC_REAL_SCRIPT VPNC_STATE_DIR="$state"
 args=(--non-inter --no-proxy --no-system-trust --cafile "$state/ca.pem" --user "$VPN_CLOUD_USER"
-    --passwd-on-stdin --interface cloudvpn --dtls-attempt-period 3
+    --passwd-on-stdin --interface cloudvpn
     --script "exec bash $repo/tests/qualification/vpnc.sh")
 [[ "$transport" != tls ]] || args+=(--no-dtls)
+openconnect "${args[@]}" --version > /dev/null 2> "$state/cli.log" ||
+    fail 'unsupported OpenConnect arguments; no network test was run'
 # Dedicated container counters; they do not modify the runner host firewall.
 for tool in iptables ip6tables; do
     "$tool" -N CLOUD_UDP
