@@ -189,8 +189,9 @@ Service_ocserv(){
 [Unit]
 Description=OpenConnect SSL VPN server (Cisco AnyConnect compatible)
 Documentation=https://ocserv.gitlab.io/www/
-After=network-online.target
+After=network-online.target ocserv-firewall.service
 Wants=network-online.target
+Requires=ocserv-firewall.service
 
 [Service]
 Type=forking
@@ -213,14 +214,15 @@ Firewall_Service_ocserv(){
     have_systemd || return 0
     Install_Systemd_Unit ocserv-firewall.service <<EOF
 [Unit]
-Description=Restore ocserv iptables firewall rules
-After=network-online.target
+Description=Restore ocserv IPv4 and IPv6 firewall rules
+Before=ocserv.service
+After=network-online.target systemd-sysctl.service
 Wants=network-online.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/sh -c 'iptables-restore < /etc/iptables.up.rules'
+ExecStart=/bin/sh -ec 'iptables-restore < /etc/iptables.up.rules; if [ -f /etc/ip6tables.up.rules ]; then ip6tables-restore < /etc/ip6tables.up.rules; fi'
 
 [Install]
 WantedBy=multi-user.target
@@ -234,7 +236,7 @@ rand(){
 }
 Generate_SSL() (
     # An explicit identity also supports private addresses and DNS deployments.
-    local server_identity="${1:-}" san_key ssl_tmp ca_name
+    local server_identity="${1:-${OCSERV_SERVER_IDENTITY:-}}" san_key ssl_tmp ca_name
     if [[ -z "$server_identity" ]]; then
         Get_ip
         server_identity="$ip"
@@ -939,6 +941,7 @@ Uninstall_ocserv(){
         fi
         Del_iptables "$tcp_port" "$udp_port" || return 1
         Remove_VPN_Forwarding_Rules || return 1
+		Remove_IPv6_Rules || return 1
         Save_iptables || return 1
         if have_systemd; then
             systemctl disable --now ocserv ocserv-firewall >/dev/null 2>&1
@@ -969,13 +972,13 @@ over(){
     echo && echo "install failed，ocserv uninstalled !" && echo
 }
 Add_iptables(){
-    # Ports passed as arguments; existence check before insert to avoid duplicate rules
-    local tcp_port="${1:-${set_tcp_port}}"
-    local udp_port="${2:-${set_udp_port}}"
-    iptables -C INPUT -m state --state NEW -m tcp -p tcp --dport ${tcp_port} -j ACCEPT 2>/dev/null || \
-        iptables -I INPUT -m state --state NEW -m tcp -p tcp --dport ${tcp_port} -j ACCEPT
-    iptables -C INPUT -m state --state NEW -m udp -p udp --dport ${udp_port} -j ACCEPT 2>/dev/null || \
-        iptables -I INPUT -m state --state NEW -m udp -p udp --dport ${udp_port} -j ACCEPT
+    local tcp_port="${1:-${set_tcp_port:-}}" udp_port="${2:-${set_udp_port:-}}"
+    [[ "$tcp_port" =~ ^[0-9]+$ && "$udp_port" =~ ^[0-9]+$ ]] || return 1
+    iptables -C INPUT -m state --state NEW -m tcp -p tcp --dport "$tcp_port" -j ACCEPT 2>/dev/null ||
+        iptables -I INPUT -m state --state NEW -m tcp -p tcp --dport "$tcp_port" -j ACCEPT || return 1
+    iptables -C INPUT -m state --state NEW -m udp -p udp --dport "$udp_port" -j ACCEPT 2>/dev/null ||
+        iptables -I INPUT -m state --state NEW -m udp -p udp --dport "$udp_port" -j ACCEPT || return 1
+    Add_ip6tables "$tcp_port" "$udp_port"
 }
 Check_iptables_Rule(){
     local table="$1" chain="$2" status
@@ -1007,7 +1010,12 @@ Del_iptables(){
     local tcp_port="${1:-${tcp_port:-}}" udp_port="${2:-${udp_port:-}}"
     [[ "$tcp_port" =~ ^[0-9]+$ && "$udp_port" =~ ^[0-9]+$ ]] || return 1
     Remove_iptables_Rule filter INPUT -m state --state NEW -m tcp -p tcp --dport "$tcp_port" -j ACCEPT || return 1
-    Remove_iptables_Rule filter INPUT -m state --state NEW -m udp -p udp --dport "$udp_port" -j ACCEPT
+    Remove_iptables_Rule filter INPUT -m state --state NEW -m udp -p udp --dport "$udp_port" -j ACCEPT || return 1
+    local pool
+    pool=$(IPv6_Pool) || return 1
+    [[ -n "$pool" ]] || return 0
+    Remove_ip6tables_Rule filter INPUT -p tcp --dport "$tcp_port" -m comment --comment ocserv-v6 -j ACCEPT || return 1
+    Remove_ip6tables_Rule filter INPUT -p udp --dport "$udp_port" -m comment --comment ocserv-v6 -j ACCEPT
 }
 Remove_VPN_Forwarding_Rules(){
     local vpn_network vpn_netmask vpn_subnet vpn_device forward_rules nat_rules interfaces egress
@@ -1043,9 +1051,102 @@ Remove_VPN_Forwarding_Rules(){
     done <<< "$interfaces"
     return 0
 }
-Save_iptables(){
-    iptables-save > /etc/iptables.up.rules
+# IPv6 is opt-in: configure a prefix routed to this server, not merely a host /128.
+# No NAT66 is added; the upstream router must have a return route to the VPN pool.
+IPv6_Pool(){
+    local pool
+    pool=$(Get_Conf_Value ipv6-network) || return 1
+    if [[ -n "$pool" && ! "$pool" =~ ^[0-9A-Fa-f:]+/[0-9]{1,3}$ ]]; then
+        echo -e "${Error} Invalid IPv6 VPN prefix: $pool" >&2
+        return 1
+    fi
+    if [[ -n "$pool" ]] && ((10#${pool##*/} < 1 || 10#${pool##*/} > 128)); then
+        echo -e "${Error} Invalid IPv6 prefix length" >&2
+        return 1
+    fi
+    printf '%s\n' "$pool"
 }
+Set_ip6tables(){
+    local pool tunnel egress routes ra_key
+    pool=$(IPv6_Pool) || return 1
+    [[ -n "$pool" ]] || return 0
+    tunnel=$(Get_Conf_Value device) || return 1
+    [[ "$tunnel" =~ ^[A-Za-z0-9_.-]+$ ]] || return 1
+    routes=$(ip -o -6 route show default) || return 1
+    egress=$(awk '{for(i=1;i<NF;i++) if($i=="dev") {print $(i+1); exit}}' <<< "$routes")
+    [[ -n "$egress" ]] || { echo -e "${Error} IPv6 enabled but no IPv6 egress route exists" >&2; return 1; }
+    # Router advertisements are normally ignored once forwarding is enabled.
+    # Preserve an RA-provided default route, only on its actual egress interface.
+    if grep -q 'proto ra' <<< "$routes"; then
+        ra_key="net/ipv6/conf/$egress/accept_ra"
+        sysctl -w "$ra_key=2" || return 1
+        grep -Fqx "$ra_key=2" /etc/sysctl.conf || printf '%s=2\n' "$ra_key" >> /etc/sysctl.conf || return 1
+    fi
+    if grep -Eq '^[[:space:]]*net\.ipv6\.conf\.all\.forwarding[[:space:]]*=' /etc/sysctl.conf; then
+        sed -i 's/^[[:space:]]*net\.ipv6\.conf\.all\.forwarding[[:space:]]*=.*/net.ipv6.conf.all.forwarding=1/' /etc/sysctl.conf || return 1
+    else
+        printf '\nnet.ipv6.conf.all.forwarding=1\n' >> /etc/sysctl.conf || return 1
+    fi
+    sysctl -w net.ipv6.conf.all.forwarding=1 || return 1
+    ip6tables -C FORWARD -i "${tunnel}+" -s "$pool" -o "$egress" \
+        -m conntrack --ctstate NEW,ESTABLISHED,RELATED -m comment --comment ocserv-v6 -j ACCEPT 2>/dev/null ||
+        ip6tables -I FORWARD -i "${tunnel}+" -s "$pool" -o "$egress" \
+            -m conntrack --ctstate NEW,ESTABLISHED,RELATED -m comment --comment ocserv-v6 -j ACCEPT || return 1
+    ip6tables -C FORWARD -i "$egress" -o "${tunnel}+" -d "$pool" \
+        -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment ocserv-v6 -j ACCEPT 2>/dev/null ||
+        ip6tables -I FORWARD -i "$egress" -o "${tunnel}+" -d "$pool" \
+            -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment ocserv-v6 -j ACCEPT || return 1
+}
+Add_ip6tables(){
+    local pool
+    pool=$(IPv6_Pool) || return 1
+    [[ -n "$pool" ]] || return 0
+    ip6tables -C INPUT -p tcp --dport "$1" -m comment --comment ocserv-v6 -j ACCEPT 2>/dev/null ||
+        ip6tables -I INPUT -p tcp --dport "$1" -m comment --comment ocserv-v6 -j ACCEPT || return 1
+    ip6tables -C INPUT -p udp --dport "$2" -m comment --comment ocserv-v6 -j ACCEPT 2>/dev/null ||
+        ip6tables -I INPUT -p udp --dport "$2" -m comment --comment ocserv-v6 -j ACCEPT || return 1
+}
+Remove_ip6tables_Rule() (
+    # Reuse the checked, idempotent deletion path for the IPv6 backend.
+    iptables(){ command ip6tables "$@"; }
+    Remove_iptables_Rule "$@"
+)
+Remove_IPv6_Rules(){
+    local pool tunnel interfaces egress tcp udp rules
+    pool=$(IPv6_Pool) || return 1
+    [[ -n "$pool" ]] || return 0
+    tunnel=$(Get_Conf_Value device) || return 1
+    tcp=$(Get_Conf_Value tcp-port) || return 1
+    udp=$(Get_Conf_Value udp-port) || return 1
+    Remove_ip6tables_Rule filter INPUT -p tcp --dport "$tcp" -m comment --comment ocserv-v6 -j ACCEPT || return 1
+    Remove_ip6tables_Rule filter INPUT -p udp --dport "$udp" -m comment --comment ocserv-v6 -j ACCEPT || return 1
+    rules=$(ip6tables -S FORWARD) || return 1
+    interfaces=$(awk -v tunnel="${tunnel}+" '/--comment ocserv-v6/ {
+        for(i=1;i<NF;i++) if(($i=="-i" || $i=="-o") && $(i+1)!=tunnel && !seen[$(i+1)]++) print $(i+1)
+    }' <<< "$rules") || return 1
+    while IFS= read -r egress; do
+        [[ -n "$egress" ]] || continue
+        Remove_ip6tables_Rule filter FORWARD -i "${tunnel}+" -s "$pool" -o "$egress" \
+            -m conntrack --ctstate NEW,ESTABLISHED,RELATED -m comment --comment ocserv-v6 -j ACCEPT || return 1
+        Remove_ip6tables_Rule filter FORWARD -i "$egress" -o "${tunnel}+" -d "$pool" \
+            -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment ocserv-v6 -j ACCEPT || return 1
+    done <<< "$interfaces"
+}
+Save_iptables() (
+    local rules4 rules6="" pool
+    rules4=$(mktemp /etc/.ocserv-rules4.XXXXXX) || return 1
+    trap 'rm -f "$rules4"; [[ -z "$rules6" ]] || rm -f "$rules6"' EXIT
+    iptables-save > "$rules4" || return 1
+    pool=$(IPv6_Pool) || return 1
+    if [[ -n "$pool" || -f /etc/ip6tables.up.rules ]]; then
+        rules6=$(mktemp /etc/.ocserv-rules6.XXXXXX) || return 1
+        ip6tables-save > "$rules6" || return 1
+        chmod 600 "$rules6" || return 1
+        mv -f "$rules6" /etc/ip6tables.up.rules || return 1
+    fi
+    chmod 600 "$rules4" || return 1
+    mv -f "$rules4" /etc/iptables.up.rules
+)
 Set_iptables(){
     local vpn_network vpn_netmask vpn_subnet vpn_device
     vpn_network=$(Get_Conf_Value ipv4-network) || return 1
@@ -1083,6 +1184,7 @@ Set_iptables(){
             -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT || return 1
     iptables -t nat -C POSTROUTING -s "$vpn_subnet" -o "$Network_card" -j MASQUERADE 2>/dev/null ||
         iptables -t nat -A POSTROUTING -s "$vpn_subnet" -o "$Network_card" -j MASQUERADE || return 1
+    Set_ip6tables || return 1
     Save_iptables || return 1
     Firewall_Service_ocserv
 }

@@ -4,15 +4,17 @@
 import argparse
 from contextlib import ExitStack
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import hashlib
 import ipaddress
 from pathlib import Path
 import signal
+import socket
 import socketserver
 import struct
 import threading
 
 
-def dns_reply(packet, address):
+def dns_reply(packet, address, address6=None):
     """Answer the test hostname without consulting any external resolver."""
     query_id = packet[:2].ljust(2, b"\0")
     flags = 0x8400  # Response from the authoritative test resolver.
@@ -46,6 +48,8 @@ def dns_reply(packet, address):
                 rcode = 4
             elif qtype == 1:
                 answer = b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 0, 4) + address.packed
+            elif qtype == 28 and address6 is not None:
+                answer = b"\xc0\x0c" + struct.pack("!HHIH", 28, 1, 0, 16) + address6.packed
     except (IndexError, UnicodeError, ValueError, struct.error):
         question = b""
         rcode = 1  # Malformed query; do not crash the test fixture.
@@ -65,16 +69,45 @@ def receive_exact(connection, length):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--address", default="198.51.100.2", type=ipaddress.IPv4Address)
+    parser.add_argument("--address6", type=ipaddress.IPv6Address)
     parser.add_argument("--payload", required=True, type=Path)
     parser.add_argument("--http-port", default=8080, type=int)
     parser.add_argument("--dns-port", default=53, type=int)
     args = parser.parse_args()
     payload = args.payload.read_bytes()
+    payload_hash = hashlib.sha256(payload).hexdigest()
 
     class ThreadingHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
         daemon_threads = True
+        request_queue_size = 128
 
     class HTTPHandler(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            # Soak tests can issue millions of requests; no per-request logs.
+            pass
+
+        def do_POST(self):
+            self.connection.settimeout(15)
+            if self.path != "/payload":
+                self.send_error(404)
+                return
+            try:
+                size = int(self.headers.get("Content-Length", "-1"))
+            except ValueError:
+                size = -1
+            if size != len(payload):
+                self.send_error(400)
+                return
+            received = self.rfile.read(size)
+            if hashlib.sha256(received).hexdigest() != payload_hash:
+                self.send_error(422)
+                return
+            result = (payload_hash + "\n").encode("ascii")
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(result)))
+            self.end_headers()
+            self.wfile.write(result)
+
         def respond(self, include_body):
             if self.path != "/payload":
                 self.send_error(404)
@@ -97,7 +130,7 @@ def main():
     class UDPHandler(socketserver.BaseRequestHandler):
         def handle(self):
             packet, connection = self.request
-            connection.sendto(dns_reply(packet, args.address), self.client_address)
+            connection.sendto(dns_reply(packet, args.address, args.address6), self.client_address)
 
     class TCPHandler(socketserver.BaseRequestHandler):
         def handle(self):
@@ -110,7 +143,7 @@ def main():
                     packet = receive_exact(self.request, struct.unpack("!H", prefix)[0])
                     if packet is None:
                         return
-                    response = dns_reply(packet, args.address)
+                    response = dns_reply(packet, args.address, args.address6)
                     self.request.sendall(struct.pack("!H", len(response)) + response)
             except (TimeoutError, ConnectionError):
                 return
@@ -130,6 +163,21 @@ def main():
             stack.enter_context(socketserver.UDPServer((str(args.address), args.dns_port), UDPHandler)),
             stack.enter_context(TCPServer((str(args.address), args.dns_port), TCPHandler)),
         ]
+        if args.address6 is not None:
+            class HTTPServer6(ThreadingHTTPServer):
+                address_family = socket.AF_INET6
+
+            class UDPServer6(socketserver.UDPServer):
+                address_family = socket.AF_INET6
+
+            class TCPServer6(TCPServer):
+                address_family = socket.AF_INET6
+
+            servers.extend([
+                stack.enter_context(HTTPServer6((str(args.address6), args.http_port), HTTPHandler)),
+                stack.enter_context(UDPServer6((str(args.address6), args.dns_port), UDPHandler)),
+                stack.enter_context(TCPServer6((str(args.address6), args.dns_port), TCPHandler)),
+            ])
         threads = [threading.Thread(target=server.serve_forever, daemon=True) for server in servers]
         for thread in threads:
             thread.start()
