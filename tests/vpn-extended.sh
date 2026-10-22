@@ -94,6 +94,13 @@ ip netns exec "$edge" sysctl -qw net.ipv4.ip_forward=1 net.ipv6.conf.all.forward
 for ((i=0; i<clients; i++)); do
     c=ve-client-$i-$$; client_names+=("$c"); client_pids+=(0); client_modes+=(tls)
     new_ns "$c"; pair "$c" vc "$edge" "c$i"
+    # Counters belong to this client, not all sessions on the server. Another
+    # client's handshake/keepalive must not look like TLS unexpectedly using UDP.
+    for fw in iptables ip6tables; do
+        ip netns exec "$c" "$fw" -N VE_UDP
+        ip netns exec "$c" "$fw" -A VE_UDP -j RETURN
+        ip netns exec "$c" "$fw" -A INPUT -p udp --sport 4443 -j VE_UDP
+    done
     ip -n "$edge" link set "c$i" master brc
     addr "$c" vc "192.0.2.$((i+10))/24" "fd42:10::$((i+10))/64"
     ip -n "$c" route add default via 192.0.2.254
@@ -110,11 +117,6 @@ openssl rand -hex 24 > "$state/password"
 ip netns exec "$server" bash "$repo/tests/vpn-extended-setup.sh" "$installer" "$state" "$clients" > "$state/setup.log" 2>&1 || fail 'fixture setup failed'
 ip netns exec "$server" /usr/local/sbin/ocserv -f -c /etc/ocserv/ocserv.conf > "$state/server.log" 2>&1 &
 server_pid=$!
-for fw in iptables ip6tables; do
-    ip netns exec "$server" "$fw" -N VE_UDP
-    ip netns exec "$server" "$fw" -A VE_UDP -j RETURN
-    ip netns exec "$server" "$fw" -A OUTPUT -p udp --sport 4443 -j VE_UDP
-done
 ip netns exec "$target" python3 "$repo/tests/vpn-workload.py" serve > "$state/target.log" 2>&1 &
 target_pid=$!
 for ((n=0; n<100; n++)); do
@@ -171,13 +173,20 @@ unreachable() {
     if ip netns exec "$c" curl --noproxy '*' -gfsS --connect-timeout 1 --max-time 2 \
         'http://[fd42:30::2]:8080/payload' -o /dev/null 2>/dev/null; then fail 'IPv6 bypass'; fi
 }
+require_route_device() {
+    local c=$1 address=$2 device=$3 route
+    # Capture all output before inspecting it. A short-circuiting grep can close
+    # a pipe before ip writes its cache line, producing SIGPIPE under pipefail.
+    route=$(ip -n "$c" -6 route get "$address") || fail "IPv6 route query failed: $address"
+    [[ " $route " == *" dev $device "* ]] || fail "Unexpected IPv6 route for $address: $route"
+}
 traffic() {
     local i=$1 c=${client_names[$1]} url family expected actual before after counter_fw transport
     if ((i%2)); then counter_fw=ip6tables; else counter_fw=iptables; fi
-    before=$(ip netns exec "$server" "$counter_fw" -nvxL VE_UDP | awk '$3=="RETURN" {print $2}')
-    ip -n "$c" -6 addr show dev vpntest | grep -q 'fd42:70:' || fail 'IPv6 lease absent'
-    ip -n "$c" -6 route get fd42:30::2 | grep -q 'dev vpntest' || fail 'IPv6 route bypass'
-    ip -n "$c" -6 route get fd42:99::1 | grep -q 'dev vc' || fail 'IPv6 split exclusion lost'
+    before=$(ip netns exec "$c" "$counter_fw" -nvxL VE_UDP | awk '$3=="RETURN" {print $2}')
+    ip -n "$c" -6 addr show dev vpntest | grep 'fd42:70:' >/dev/null || fail 'IPv6 lease absent'
+    require_route_device "$c" fd42:30::2 vpntest
+    require_route_device "$c" fd42:99::1 vc
     for family in 4 6; do
         if ((family == 4)); then url=http://198.51.100.2:8080/payload; else url='http://[fd42:30::2]:8080/payload'; fi
         ip netns exec "$c" curl --noproxy '*' -gfsS --max-time 15 -D "$state/headers" "$url" -o "$state/payload"
@@ -186,7 +195,7 @@ traffic() {
         if ((family == 4)); then grep -q 'X-Seen-Client-IP: 198.51.100.1' "$state/headers" || fail 'IPv4 NAT';
         else grep -q 'X-Seen-Client-IP: fd42:70:' "$state/headers" || fail 'IPv6 routed source'; fi
     done
-    after=$(ip netns exec "$server" "$counter_fw" -nvxL VE_UDP | awk '$3=="RETURN" {print $2}')
+    after=$(ip netns exec "$c" "$counter_fw" -nvxL VE_UDP | awk '$3=="RETURN" {print $2}')
     if [[ ${client_modes[$i]} == dtls ]]; then
         ((after-before > 200000)) || fail 'DTLS handshake did not carry the actual payload'
     else
@@ -195,7 +204,7 @@ traffic() {
     for transport in '' '+tcp'; do
         # Query an IPv6 resolver over both UDP and TCP, require the AAAA result.
         ip netns exec "$c" dig $transport +short +time=2 +tries=1 @fd42:30::2 vpn-test.internal AAAA |
-            grep -Fxq fd42:30::2 || fail 'IPv6 DNS'
+            grep -Fx fd42:30::2 >/dev/null || fail 'IPv6 DNS'
     done
     ip netns exec "$c" curl --noproxy '*' -6fsS --max-time 15 \
         -D "$logs/hostname-headers.txt" -w '%{remote_ip} %{http_code} %{size_download}\n' \

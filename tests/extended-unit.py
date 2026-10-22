@@ -3,6 +3,9 @@
 import hashlib
 import http.server
 import importlib.util
+import os
+import re
+import subprocess
 import socket
 import struct
 import threading
@@ -21,6 +24,30 @@ def query(name, kind):
 
 
 class FixtureTests(unittest.TestCase):
+    def test_route_assertion_consumes_output_and_rejects_wrong_devices(self):
+        # Exercise the same Bash assertion used in the network job, without root.
+        source = Path(__file__).with_name('vpn-extended.sh').read_text()
+        function = re.search(r'(?ms)^require_route_device\(\) \{\n.*?^\}', source)
+        self.assertIsNotNone(function)
+        script = """set -euo pipefail
+fail() { printf '%s\\n' "$*" >&2; exit 1; }
+ip() {
+    printf '%s\\n' "$TEST_ROUTE"
+    sleep .05
+    printf '    cache\\n'
+    return "$TEST_STATUS"
+}
+""" + function.group() + '\nrequire_route_device fixture fd42:99::1 vc\n'
+        for route, status, passed in (
+                ('fd42:99::1 via fd42:10::ffff dev vc src fd42:10::10', '0', True),
+                ('fd42:99::1 dev vpntest src fd42:70::1', '0', False),
+                ('fd42:99::1 dev vc-extra src fd42:10::10', '0', False),
+                ('fd42:99::1 dev vc src fd42:10::10', '2', False)):
+            with self.subTest(route=route, status=status):
+                result = subprocess.run(['bash', '-c', script], capture_output=True,
+                    env=dict(os.environ, TEST_ROUTE=route, TEST_STATUS=status), timeout=5)
+                self.assertEqual(result.returncode == 0, passed, result.stderr.decode())
+
     def test_a(self):
         reply = w.dns_reply(query(w.NAME, 1))
         self.assertEqual(reply[-4:], socket.inet_aton(w.V4))
