@@ -14,6 +14,18 @@ import socket
 import threading
 
 
+class FixtureServer(ThreadingHTTPServer):
+    def server_bind(self):
+        # HTTPServer.server_bind calls getfqdn(), which can block in an isolated
+        # namespace before its private DNS fixture has started. No lookup needed.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
+class IPv6Server(FixtureServer):
+    address_family = socket.AF_INET6
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--address", action="append", required=True)
@@ -67,9 +79,6 @@ def main():
 
         def log_message(self, *_):
             pass  # Do not fill CI storage at sustained load.
-
-    class IPv6Server(ThreadingHTTPServer):
-        address_family = socket.AF_INET6
 
     def dns_reply(packet):
         question = answer = b""
@@ -145,7 +154,7 @@ def main():
     for signum in (signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, lambda *_: stopped.set())
     with ExitStack() as stack:
-        servers = [stack.enter_context((IPv6Server if ":" in address else ThreadingHTTPServer)(
+        servers = [stack.enter_context((IPv6Server if ":" in address else FixtureServer)(
                    (address, args.port), Handler)) for address in args.address]
         if args.dns_port:
             for address in args.address:

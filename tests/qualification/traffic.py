@@ -9,7 +9,6 @@ import json
 import math
 import os
 from pathlib import Path
-import statistics
 import time
 from urllib.parse import urlsplit
 
@@ -74,6 +73,8 @@ def quantile(histogram, fraction):
     for bucket, value in enumerate(histogram):
         count += value
         if count >= threshold:
+            if bucket == 2000:
+                return None  # Overflow bucket has no finite upper bound.
             return round((bucket + 1) / 100, 2)
     return None
 
@@ -117,7 +118,7 @@ def main():
               "aggregate_mbps": mbps, "minimum_mbps": args.minimum_mbps,
               "cycle_latency_p50_seconds_upper_bound": quantile(histogram, .50),
               "cycle_latency_p95_seconds_upper_bound": quantile(histogram, .95),
-              "results": results}
+              "cycles_over_20_seconds": histogram[2000], "results": results}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps({key: value for key, value in report.items() if key != "results"}))

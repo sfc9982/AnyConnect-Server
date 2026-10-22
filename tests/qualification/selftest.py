@@ -3,16 +3,23 @@
 import importlib.util
 from pathlib import Path
 import socket
+import selectors
+import struct
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location('traffic', ROOT / 'traffic.py')
 traffic = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(traffic)
+
+spec = importlib.util.spec_from_file_location('target', ROOT / 'target.py')
+target = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(target)
 
 
 class FixtureTests(unittest.TestCase):
@@ -24,22 +31,42 @@ class FixtureTests(unittest.TestCase):
             with socket.socket() as sock:
                 sock.bind(('127.0.0.1', 0))
                 port = sock.getsockname()[1]
+            with socket.socket() as sock:
+                sock.bind(('127.0.0.1', 0))
+                dns_port = sock.getsockname()[1]
             process = subprocess.Popen([sys.executable, str(ROOT / 'target.py'),
                 '--address', '127.0.0.1', '--address', '::1', '--port', str(port),
-                '--payload', str(path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                '--payload', str(path), '--dns-port', str(dns_port)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             try:
-                deadline = time.monotonic() + 5
-                while True:
-                    if process.poll() is not None:
-                        self.fail(process.stderr.read().decode())
-                    try:
-                        connection = socket.create_connection(('127.0.0.1', port), timeout=.1)
-                        connection.close()
-                        break
-                    except OSError:
-                        if time.monotonic() > deadline:
-                            self.fail('fixture readiness timed out')
-                        time.sleep(.05)
+                with selectors.DefaultSelector() as ready:
+                    ready.register(process.stdout, selectors.EVENT_READ)
+                    self.assertTrue(ready.select(5), 'fixture readiness timed out')
+                    self.assertEqual(process.stdout.readline(), b'ready\n')
+                query = (struct.pack('!6H', 123, 0x0100, 1, 0, 0, 0)
+                         + b'\x08vpn-test\x08internal\x00' + struct.pack('!HH', 28, 1))
+                for family, host in ((socket.AF_INET, '127.0.0.1'), (socket.AF_INET6, '::1')):
+                    for kind in (socket.SOCK_DGRAM, socket.SOCK_STREAM):
+                        with socket.socket(family, kind) as sock:
+                            sock.settimeout(2)
+                            sock.connect((host, dns_port))
+                            if kind == socket.SOCK_DGRAM:
+                                sock.send(query)
+                                response = sock.recv(1024)
+                            else:
+                                sock.sendall(struct.pack('!H', len(query)) + query)
+                                def receive(length):
+                                    data = b''
+                                    while len(data) < length:
+                                        piece = sock.recv(length - len(data))
+                                        if not piece:
+                                            self.fail('short TCP DNS reply')
+                                        data += piece
+                                    return data
+                                length = struct.unpack('!H', receive(2))[0]
+                                response = receive(length)
+                            header = struct.unpack('!6H', response[:12])
+                            self.assertEqual((header[0], header[1] & 15, header[3]), (123, 0, 1))
+                            self.assertEqual(response[-16:], socket.inet_pton(socket.AF_INET6, '::1'))
                 for host in ('127.0.0.1', '[::1]'):
                     count, peer = traffic.transfer(f'http://{host}:{port}', payload, 2)
                     self.assertEqual(count, 2 * len(payload))
@@ -55,10 +82,18 @@ class FixtureTests(unittest.TestCase):
                 process.terminate()
                 process.communicate(timeout=5)
 
+    def test_startup_never_needs_reverse_dns(self):
+        from http.server import BaseHTTPRequestHandler
+        with patch('socket.getfqdn', side_effect=AssertionError('external DNS lookup')):
+            for cls, address in ((target.FixtureServer, '127.0.0.1'), (target.IPv6Server, '::1')):
+                with cls((address, 0), BaseHTTPRequestHandler) as server:
+                    self.assertEqual(server.server_name, address)
+
     def test_url_and_metric_bounds(self):
         with self.assertRaises(ValueError):
             traffic.transfer('ftp://127.0.0.1', b'x' * 1024, 1)
         self.assertIsNone(traffic.quantile([0, 0], .95))
+        self.assertIsNone(traffic.quantile([0] * 2000 + [1], .95))
         self.assertEqual(traffic.quantile([1, 0, 1], .95), .03)
 
 
