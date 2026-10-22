@@ -1,0 +1,59 @@
+name: Live VPS acceptance (opt-in)
+
+on:
+  workflow_dispatch:
+    inputs:
+      transport:
+        description: Expected transport for the preconfigured provider policy
+        type: choice
+        options: [dtls, tls, fallback]
+        default: dtls
+      seconds:
+        description: Sustained traffic seconds per address family (1..7200)
+        type: string
+        default: '300'
+
+permissions:
+  contents: read
+
+jobs:
+  accept:
+    # Never expose target credentials to a PR branch or an arbitrary dispatch ref.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    environment: vpn-cloud-acceptance
+    timeout-minutes: 250
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Test the explicitly configured VPS from a disposable client
+        env:
+          VPN_CLOUD_SERVER: ${{ vars.VPN_CLOUD_SERVER }}
+          VPN_CLOUD_USER: ${{ vars.VPN_CLOUD_USER }}
+          VPN_CLOUD_TARGET4: ${{ vars.VPN_CLOUD_TARGET4 }}
+          VPN_CLOUD_TARGET6: ${{ vars.VPN_CLOUD_TARGET6 }}
+          VPN_CLOUD_PROVIDER: ${{ vars.VPN_CLOUD_PROVIDER }}
+          VPN_CLOUD_POLICY_EVIDENCE: ${{ secrets.VPN_CLOUD_POLICY_EVIDENCE }}
+          VPN_CLOUD_PASSWORD: ${{ secrets.VPN_CLOUD_PASSWORD }}
+          VPN_CLOUD_CA: ${{ secrets.VPN_CLOUD_CA }}
+          VPN_CLOUD_TRANSPORT: ${{ inputs.transport }}
+          VPN_SOAK_SECONDS: ${{ inputs.seconds }}
+        run: |
+          : "${VPN_CLOUD_SERVER:?Configure the protected vpn-cloud-acceptance environment first}"
+          mkdir -p "$RUNNER_TEMP/cloud-logs"
+          sudo modprobe tun
+          docker run --rm --cap-add NET_ADMIN --device /dev/net/tun \
+            -v "$GITHUB_WORKSPACE:/workspace:ro" -v "$RUNNER_TEMP/cloud-logs:/logs" -w /workspace \
+            -e VPN_E2E_DISPOSABLE=1 -e VPN_E2E_LOG_DIR=/logs \
+            -e VPN_CLOUD_SERVER -e VPN_CLOUD_USER -e VPN_CLOUD_TARGET4 -e VPN_CLOUD_TARGET6 \
+            -e VPN_CLOUD_PROVIDER -e VPN_CLOUD_POLICY_EVIDENCE -e VPN_CLOUD_PASSWORD -e VPN_CLOUD_CA \
+            -e VPN_CLOUD_TRANSPORT -e VPN_SOAK_SECONDS ubuntu:24.04 bash -c \
+            'set -e; apt-get update; DEBIAN_FRONTEND=noninteractive apt-get install -y openconnect vpnc-scripts curl python3 iproute2 iptables; bash tests/qualification/cloud.sh'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-vps-acceptance
+          path: ${{ runner.temp }}/cloud-logs
+          if-no-files-found: warn
+          retention-days: 7

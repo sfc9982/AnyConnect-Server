@@ -6,6 +6,15 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      soak_seconds:
+        description: Sustained traffic duration per language/distro (1..7200 seconds)
+        type: string
+        default: '1800'
+      clients:
+        description: Simultaneous authenticated clients (2..8)
+        type: string
+        default: '4'
 
 permissions:
   contents: read
@@ -15,23 +24,117 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  source:
-    name: Qualification source snapshot
+  checks:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Record reproducible source and revision
+      - name: Check qualification tools
         run: |
-          mkdir -p "$RUNNER_TEMP/qualification-source"
-          git archive --format=tar HEAD | gzip > "$RUNNER_TEMP/qualification-source/source.tar.gz"
-          git rev-parse HEAD > "$RUNNER_TEMP/qualification-source/revision.txt"
-          sha256sum "$RUNNER_TEMP/qualification-source/source.tar.gz" > "$RUNNER_TEMP/qualification-source/SHA256SUMS"
-      - uses: actions/upload-artifact@v4
+          bash -n ocserv-network.sh
+          for script in tests/qualification/*.sh; do bash -n "$script"; done
+          shellcheck -S error ocserv-network.sh tests/qualification/*.sh
+          python3 -m compileall -q tests/qualification
+          python3 tests/qualification/selftest.py
+
+  network:
+    name: Dual-stack and load (${{ matrix.image }}, ${{ matrix.installer }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ['ubuntu:24.04', 'debian:12', 'rockylinux:9']
+        installer: [ocserv.sh, ocserv-en.sh]
+    env:
+      VPN_SOAK_SECONDS: ${{ inputs.soak_seconds || '60' }}
+      VPN_SOAK_CLIENTS: ${{ inputs.clients || '4' }}
+      DISTRO_IMAGE: ${{ matrix.image }}
+      INSTALLER: ${{ matrix.installer }}
+    steps:
+      - uses: actions/checkout@v4
         with:
-          name: qualification-source
-          path: ${{ runner.temp }}/qualification-source
+          persist-credentials: false
+      - name: Run isolated network qualification
+        run: |
+          mkdir -p "$RUNNER_TEMP/qualification-logs"
+          sudo modprobe tun
+          docker run --rm --privileged --device /dev/net/tun \
+            -v "$GITHUB_WORKSPACE:/workspace:ro" \
+            -v "$RUNNER_TEMP/qualification-logs:/logs" -w /workspace \
+            -e VPN_E2E_DISPOSABLE=1 -e VPN_E2E_LOG_DIR=/logs \
+            -e VPN_SOAK_SECONDS -e VPN_SOAK_CLIENTS -e INSTALLER \
+            "$DISTRO_IMAGE" bash -c \
+            'set -e; bash tests/vpn-install.sh "$INSTALLER"; bash tests/qualification/network.sh "$INSTALLER"'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qualification-network-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/qualification-logs
+          if-no-files-found: warn
           retention-days: 7
-          if-no-files-found: error
+
+  soak:
+    name: Thirty-minute sustained dual-stack workload
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      VPN_SOAK_SECONDS: ${{ inputs.soak_seconds || '1800' }}
+      VPN_SOAK_CLIENTS: ${{ inputs.clients || '4' }}
+      DISTRO_IMAGE: ubuntu:24.04
+      INSTALLER: ocserv-en.sh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Run isolated network qualification
+        run: |
+          mkdir -p "$RUNNER_TEMP/qualification-logs"
+          sudo modprobe tun
+          docker run --rm --privileged --device /dev/net/tun \
+            -v "$GITHUB_WORKSPACE:/workspace:ro" \
+            -v "$RUNNER_TEMP/qualification-logs:/logs" -w /workspace \
+            -e VPN_E2E_DISPOSABLE=1 -e VPN_E2E_LOG_DIR=/logs \
+            -e VPN_SOAK_SECONDS -e VPN_SOAK_CLIENTS -e INSTALLER \
+            "$DISTRO_IMAGE" bash -c \
+            'set -e; bash tests/vpn-install.sh "$INSTALLER"; bash tests/qualification/network.sh "$INSTALLER"'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qualification-soak
+          path: ${{ runner.temp }}/qualification-logs
+          if-no-files-found: warn
+          retention-days: 7
+
+  boot:
+    name: Real VM boot (${{ matrix.installer }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        installer: [ocserv.sh, ocserv-en.sh]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install disposable VM tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils
+      - name: Install, reboot and cold-boot the real service
+        env:
+          INSTALLER: ${{ matrix.installer }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/boot-logs"
+          sudo env VPN_E2E_DISPOSABLE=1 VPN_E2E_LOG_DIR="$RUNNER_TEMP/boot-logs" \
+            bash tests/qualification/boot-host.sh "$INSTALLER"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qualification-boot-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/boot-logs
+          if-no-files-found: warn
+          retention-days: 7
