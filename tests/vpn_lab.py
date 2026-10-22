@@ -103,6 +103,12 @@ class Client:
             run([tool, "-A", "QA_UDP", "-j", "RETURN"], ns=self.ns)
             run([tool, "-A", "INPUT", "-p", "udp", "--sport", "4443", "-j", "QA_UDP"], ns=self.ns)
 
+    def endpoint_routes(self):
+        # Stock vpnc-script removes its gateway exception on disconnect.
+        # Restore only the declared underlay endpoints, never inner target routes.
+        self.lab.ip(self.ns, "route", "replace", "192.0.2.1/32", "via", "192.0.2.254")
+        self.lab.ip(self.ns, "-6", "route", "replace", "fd42:1::1/128", "via", "fd42:1::fe")
+
     def counter(self):
         tool = "ip6tables" if self.family == 6 else "iptables"
         lines = text([tool, "-nvxL", "QA_UDP"], ns=self.ns).splitlines()
@@ -111,10 +117,7 @@ class Client:
     def start(self, family=4, dtls=True, password=False, expect_dtls=True):
         self.stop()
         self.family, self.dtls = family, dtls
-        # Recreate fixture endpoint routes removed by stock vpnc-script cleanup.
-        # These two host exceptions never expose either protected inner target.
-        self.lab.ip(self.ns, "route", "replace", "192.0.2.1/32", "via", "192.0.2.254")
-        self.lab.ip(self.ns, "-6", "route", "replace", "fd42:1::1/128", "via", "fd42:1::fe")
+        self.endpoint_routes()
         for filename in ("connected", "address", "address6", "dns", "dns6"):
             if (self.state / filename).exists():
                 (self.state / filename).unlink()
@@ -334,6 +337,7 @@ class Lab:
             run([tool, "-A", "FORWARD", "-p", "ipv6-icmp" if family == 6 else "icmp", "-j", "ACCEPT"], ns=self.edge)
 
     def tcp_blocked(self, family):
+        self.clients[0].endpoint_routes()
         address = "fd42:1::1" if family == 6 else "192.0.2.1"
         probe = ("import socket,sys; s=socket.socket(socket.AF_INET6 if ':' in sys.argv[1] else socket.AF_INET); "
                  "s.settimeout(2); sys.exit(0 if s.connect_ex((sys.argv[1],4443)) else 1)")
@@ -489,6 +493,19 @@ class Lab:
         self.passed(f"{len(self.clients)} concurrent mixed clients, {actual:.1f}s continuous bidirectional dual-stack traffic; sessions and TUNs cleaned")
 
     def close(self):
+        if self.report.get("status") == "failed":
+            for ns in self.namespaces:
+                evidence = []
+                for command in (("ip", "-o", "addr"), ("ip", "-4", "route"), ("ip", "-6", "route"),
+                                ("iptables", "-nvxL"), ("iptables", "-t", "nat", "-nvxL"),
+                                ("ip6tables", "-nvxL"), ("ss", "-Htn")):
+                    try:
+                        result = run(command, ns=ns, check=False, timeout=5)
+                        evidence.append("$ " + " ".join(command) + "\n" +
+                                        (result.stdout + result.stderr).decode(errors="replace"))
+                    except Exception as exc:
+                        evidence.append(type(exc).__name__)
+                (self.logs / (ns + "-network.txt")).write_text("\n".join(evidence))
         for client in self.clients:
             client.stop()
         for process in reversed(self.processes):

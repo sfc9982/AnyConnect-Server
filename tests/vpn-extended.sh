@@ -172,7 +172,7 @@ unreachable() {
         'http://[fd42:30::2]:8080/payload' -o /dev/null 2>/dev/null; then fail 'IPv6 bypass'; fi
 }
 traffic() {
-    local i=$1 c=${client_names[$1]} url family expected before after counter_fw
+    local i=$1 c=${client_names[$1]} url family expected actual before after counter_fw transport
     if ((i%2)); then counter_fw=ip6tables; else counter_fw=iptables; fi
     before=$(ip netns exec "$server" "$counter_fw" -nvxL VE_UDP | awk '$3=="RETURN" {print $2}')
     ip -n "$c" -6 addr show dev vpntest | grep -q 'fd42:70:' || fail 'IPv6 lease absent'
@@ -197,8 +197,14 @@ traffic() {
         ip netns exec "$c" dig $transport +short +time=2 +tries=1 @fd42:30::2 vpn-test.internal AAAA |
             grep -Fxq fd42:30::2 || fail 'IPv6 DNS'
     done
-    ip netns exec "$c" curl --noproxy '*' -6fsS --max-time 15 http://vpn-test.internal:8080/payload -o "$state/payload"
-    [[ $(sha256sum "$state/payload" | cut -d' ' -f1) == "$expected" ]] || fail 'normal AAAA resolution'
+    ip netns exec "$c" curl --noproxy '*' -6fsS --max-time 15 \
+        -D "$logs/hostname-headers.txt" -w '%{remote_ip} %{http_code} %{size_download}\n' \
+        http://vpn-test.internal:8080/payload -o "$state/payload" > "$logs/hostname-result.txt" ||
+        fail 'normal AAAA HTTP request failed'
+    actual=$(sha256sum "$state/payload" | cut -d' ' -f1)
+    printf 'expected=%s\nactual=%s\nbytes=%s\n' "$expected" "$actual" \
+        "$(wc -c < "$state/payload")" > "$logs/hostname-integrity.txt"
+    [[ $actual == "$expected" ]] || fail 'normal AAAA payload integrity (see hostname-integrity.txt)'
 }
 # Positive and negative controls at two distinct firewall layers.
 for i in 0 1; do

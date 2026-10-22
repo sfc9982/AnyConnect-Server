@@ -1,4 +1,5 @@
 """Fast protocol/fixture regressions; no root or external networking required."""
+import errno
 import hashlib
 import http.client
 import importlib.util
@@ -11,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 from vpn_lab import redact, stop_process, wait_for, version_line
@@ -18,6 +20,9 @@ from vpn_lab import redact, stop_process, wait_for, version_line
 spec = importlib.util.spec_from_file_location("target", Path(__file__).with_name("vpn-target.py"))
 target = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(target)
+probe_spec = importlib.util.spec_from_file_location("probe", Path(__file__).with_name("vpn-probe.py"))
+probe = importlib.util.module_from_spec(probe_spec)
+probe_spec.loader.exec_module(probe)
 
 
 def question(kind=1, name="vpn-test.internal"):
@@ -26,6 +31,27 @@ def question(kind=1, name="vpn-test.internal"):
 
 
 class ProductionTests(unittest.TestCase):
+    def test_external_preflight_rejects_reachable_http(self):
+        for code in (301, 401, 404, 500):
+            with patch.object(probe, 'download', side_effect=urllib.error.HTTPError(
+                    'http://127.0.0.1/payload', code, 'test', {}, None)):
+                with self.assertRaisesRegex(RuntimeError, 'returned HTTP'):
+                    probe.require_target_unreachable('http://127.0.0.1/payload')
+        with patch.object(probe, 'download', side_effect=urllib.error.URLError(
+                OSError(errno.ENETUNREACH, 'network unreachable'))):
+            probe.require_target_unreachable('http://127.0.0.1/payload')
+        with patch.object(probe, 'download', side_effect=urllib.error.URLError('bad certificate')):
+            with self.assertRaisesRegex(RuntimeError, 'non-network'):
+                probe.require_target_unreachable('https://127.0.0.1/payload')
+        self.assertIsNone(probe.NoRedirect().redirect_request(None, None, 302, '', {}, 'http://other.invalid'))
+
+    def test_external_readiness_accepts_missing_route_until_connected(self):
+        address = ipaddress.ip_address('fd42:2::2')
+        for status, route, expected in ((2, '', False), (0, 'dev eth0', False), (0, 'dev vpntest', True)):
+            with patch.object(probe.subprocess, 'run', return_value=
+                    subprocess.CompletedProcess([], status, route, '')):
+                self.assertEqual(probe.route_uses_tunnel(address), expected)
+
     def test_version_output_on_either_stream(self):
         for stdout, stderr in ((b'OpenConnect 9.12\n', b''),
                                (b'', b'OpenConnect VPN Server 1.5.0\n')):

@@ -5,6 +5,7 @@ Input JSON names endpoint, username, password_file, ca_file, target_url, target_
 expected_sha256 and transport (tls/dtls/fallback). Never uploads OpenConnect logs.
 """
 import argparse
+import errno
 import hashlib
 import ipaddress
 import json
@@ -15,6 +16,7 @@ import socket
 import subprocess
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -24,13 +26,42 @@ def run(*args):
     return subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL)
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # The route assertion applies to the authorized numeric target only.
+        return None
+
+
 def download(url):
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
     with opener.open(url, timeout=10) as response:
         body = response.read(4 * 1024 * 1024 + 1)
         if len(body) > 4 * 1024 * 1024:
             raise RuntimeError('target payload exceeds 4 MiB limit')
         return body, response.headers.get('X-Seen-Client-IP')
+
+
+def require_target_unreachable(url):
+    try:
+        download(url)
+    except urllib.error.HTTPError:
+        # A 3xx/4xx/5xx response proves the private HTTP service is reachable.
+        raise RuntimeError('private target returned HTTP before VPN connection') from None
+    except urllib.error.URLError as exc:
+        reason = exc.reason
+        if isinstance(reason, TimeoutError) or (isinstance(reason, OSError) and reason.errno in
+                (errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ECONNREFUSED, errno.ETIMEDOUT)):
+            return
+        raise RuntimeError('private-target preflight failed for a non-network reason') from None
+    except TimeoutError:
+        return
+    raise RuntimeError('private target was reachable before VPN connection')
+
+
+def route_uses_tunnel(target_ip):
+    result = subprocess.run(['ip', '-6' if target_ip.version == 6 else '-4', 'route', 'get', str(target_ip)],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5)
+    return result.returncode == 0 and 'dev vpntest' in result.stdout
 
 
 def probe(cfg):
@@ -55,12 +86,7 @@ def probe(cfg):
     if not private and not cfg.get('expected_source'):
         raise ValueError('public targets require expected_source to prove VPN egress')
     if private:
-        try:
-            download(cfg['target_url'])
-        except (OSError, TimeoutError):
-            pass
-        else:
-            raise RuntimeError('private target was reachable before VPN connection')
+        require_target_unreachable(cfg['target_url'])
     routing = next((p for p in ('/usr/share/vpnc-scripts/vpnc-script', '/etc/vpnc/vpnc-script',
                                 '/etc/openconnect/vpnc-script') if os.access(p, os.X_OK)), None)
     if not routing:
@@ -95,8 +121,8 @@ def probe(cfg):
                 while time.monotonic() < deadline:
                     if proc.poll() is not None:
                         raise RuntimeError('VPN process exited before connection')
-                    route = run('ip', '-6' if target_ip.version == 6 else '-4', 'route', 'get', str(target_ip))
-                    ready = 'dev vpntest' in route
+                    # An IPv6 route may not exist at all before tunnel setup.
+                    ready = route_uses_tunnel(target_ip)
                     if ready and (transport != 'dtls' or 'Established DTLS connection' in log.read_text(errors='replace')):
                         break
                     time.sleep(.25)
@@ -107,6 +133,8 @@ def probe(cfg):
                 before = udp_bytes()
                 total = 0
                 for _ in range(3):
+                    if not route_uses_tunnel(target_ip):
+                        raise RuntimeError('protected target lost its tunnel route')
                     body, source = download(cfg['target_url'])
                     if hashlib.sha256(body).hexdigest() != cfg['expected_sha256'].lower():
                         raise RuntimeError('VPN payload hash mismatch')
