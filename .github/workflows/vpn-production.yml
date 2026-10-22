@@ -1,0 +1,38 @@
+name: VPN production validation
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, test/ipv6-load-systemd-vps]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vpn-production-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static:
+    name: Static checks and tested source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check shell and Python syntax
+        run: |
+          for script in ocserv*.sh tests/*.sh; do bash -n "$script"; done
+          python3 -m compileall -q tests
+          bash tests/installer-regressions.sh
+      - name: Record the exact source used by validation
+        run: git archive --format=tar HEAD > "$RUNNER_TEMP/vpn-tested-source.tar"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vpn-tested-source
+          path: ${{ runner.temp }}/vpn-tested-source.tar
+          retention-days: 3
+          if-no-files-found: error
