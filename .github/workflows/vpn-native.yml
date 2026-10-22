@@ -1,0 +1,96 @@
+name: Native IPv6 forwarding and boot regression
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Continuous verified traffic duration
+        type: choice
+        options: ['30', '1800', '7200']
+        default: '1800'
+      clients:
+        description: Concurrent mixed TLS/DTLS clients
+        type: choice
+        options: ['4', '20', '50', '100']
+        default: '20'
+permissions:
+  contents: read
+concurrency:
+  group: vpn-native-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  fixture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: |
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
+          for f in ocserv*.sh tests/*.sh; do bash -n "$f"; done
+          shellcheck -S error ocserv*.sh tests/*.sh
+          python3 -m compileall -q tests
+  routed-ipv6:
+    name: Native IPv6 rules and upstream ACLs (${{ matrix.installer }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 145
+    strategy:
+      fail-fast: false
+      matrix:
+        installer: [ocserv.sh, ocserv-en.sh]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Production forwarding helpers, real mixed clients and load
+        env:
+          INSTALLER: ${{ matrix.installer }}
+          SECONDS_REQUESTED: ${{ inputs.seconds || '30' }}
+          CLIENTS_REQUESTED: ${{ inputs.clients || '4' }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/native-logs"
+          sudo modprobe tun
+          docker run --rm --privileged --device /dev/net/tun \
+            -v "$GITHUB_WORKSPACE:/workspace:ro" -v "$RUNNER_TEMP/native-logs:/reports" -w /workspace \
+            -e VPN_E2E_DISPOSABLE=1 -e INSTALLER -e SECONDS_REQUESTED -e CLIENTS_REQUESTED \
+            ubuntu:24.04 bash -ec 'bash tests/vpn-install.sh "$INSTALLER"; python3 tests/vpn_lab.py --installer "$INSTALLER" --clients "$CLIENTS_REQUESTED" --duration "$SECONDS_REQUESTED" --log-dir /reports'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-ipv6-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/native-logs
+          retention-days: 7
+          if-no-files-found: warn
+  boot-jammy:
+    name: Ubuntu 22.04 kernel reboot (${{ matrix.installer }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        installer: [ocserv.sh, ocserv-en.sh]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install QEMU tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils openssh-client
+          if [ -e /dev/kvm ]; then sudo setfacl -m "u:$USER:rw" /dev/kvm; fi
+      - name: Normal install, daemon crash, service stop/start and two kernel reboots
+        env:
+          INSTALLER: ${{ matrix.installer }}
+        run: |
+          python3 tests/vpn_vm.py --image jammy --installer "$INSTALLER" --log-dir "$RUNNER_TEMP/boot-logs"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: boot-jammy-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/boot-logs
+          retention-days: 7
+          if-no-files-found: warn
