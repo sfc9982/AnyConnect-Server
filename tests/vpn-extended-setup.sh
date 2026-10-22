@@ -16,7 +16,7 @@ Ensure_CRL >> "$state/pki.log" 2>&1 || exit 1
 Configure_Auth || exit 1
 for pair in 'tcp-port 4443' 'udp-port 4443' 'max-ban-score 0' \
     'ipv6-network fd42:70::/48' 'ipv6-subnet-prefix 128' \
-    'dns 198.51.100.2' 'route default' 'mtu 1280'; do
+    'dns 198.51.100.2' 'route default' 'mtu 1420'; do
     read -r key value <<< "$pair"
     Set_Conf_Value "$key" "$value" || exit 1
 done

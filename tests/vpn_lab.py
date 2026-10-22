@@ -111,6 +111,10 @@ class Client:
     def start(self, family=4, dtls=True, password=False, expect_dtls=True):
         self.stop()
         self.family, self.dtls = family, dtls
+        # Recreate fixture endpoint routes removed by stock vpnc-script cleanup.
+        # These two host exceptions never expose either protected inner target.
+        self.lab.ip(self.ns, "route", "replace", "192.0.2.1/32", "via", "192.0.2.254")
+        self.lab.ip(self.ns, "-6", "route", "replace", "fd42:1::1/128", "via", "fd42:1::fe")
         for filename in ("connected", "address", "address6", "dns", "dns6"):
             if (self.state / filename).exists():
                 (self.state / filename).unlink()
@@ -152,6 +156,8 @@ class Client:
             if "dev vpntest" not in text(["ip", family, "route", "get", target], ns=self.ns):
                 raise RuntimeError(f"{target} does not use the VPN interface")
         addresses = json.loads(text(["ip", "-j", "-6", "addr", "show", "dev", "vpntest"], ns=self.ns))
+        if not addresses or any(link["mtu"] < 1280 for link in addresses):
+            raise RuntimeError("negotiated tunnel MTU is below the IPv6 minimum")
         if not any(ipaddress.ip_address(a["local"]) in V6_POOL
                    for link in addresses for a in link["addr_info"] if a["family"] == "inet6"):
             raise RuntimeError("missing negotiated IPv6 lease")
@@ -388,12 +394,12 @@ class Lab:
         self.passed("stateless upstream requires explicit ephemeral-port return rules")
         self.profile("stateful")
         for ns, dev in ((self.edge, "to-server"), (self.server, "wan")):
-            self.ip(ns, "link", "set", dev, "mtu", "1280")
+            self.ip(ns, "link", "set", dev, "mtu", "1400")
         client.start(6)
         client.transfer(6)
         client.transfer(6, upload=True)
         client.stop()
-        self.passed("1280-byte IPv6 underlay supports large, hash-verified transfers")
+        self.passed("1400-byte IPv6 underlay supports large, hash-verified transfers without dropping IPv6")
         for ns, dev in ((self.edge, "to-server"), (self.server, "wan")):
             self.ip(ns, "link", "set", dev, "mtu", "1500")
 

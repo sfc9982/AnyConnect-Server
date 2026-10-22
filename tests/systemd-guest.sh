@@ -75,7 +75,8 @@ case "$action" in
         bash "$0" "$installer" check "$identity"
         ;;
     uninstall)
-        Uninstall_ocserv <<< y > "$state/uninstall.log" 2>&1
+        # Production entrypoint is non-errexit; assert both exit status and effects.
+        Uninstall_ocserv <<< y > "$state/uninstall.log" 2>&1 || exit 1
         [[ ! -e /usr/local/sbin/ocserv && ! -e /etc/ocserv ]]
         iptables-save | normalize | cmp -s - "$state/baseline.rules"
         normalize < /etc/iptables.up.rules | cmp -s - "$state/baseline.rules"

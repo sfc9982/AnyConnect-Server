@@ -132,7 +132,8 @@ PYDIAG
         ! ss -Hlun | grep -Eq ':4443[[:space:]]'
         ;;
     uninstall)
-        Uninstall_ocserv <<< y
+        # Match the non-errexit interactive entrypoint while checking its result.
+        Uninstall_ocserv <<< y || { echo 'Uninstall failed' >&2; exit 1; }
         [[ ! -e "$file" && ! -e "$conf_file" && ! -e /etc/systemd/system/ocserv.service ]]
         ! systemctl is-enabled --quiet ocserv
         iptables -C INPUT -p tcp --dport 18081 -m comment --comment qa-unrelated -j ACCEPT

@@ -141,13 +141,17 @@ connect_client() {
     local i=$1 mode=$2 c=${client_names[$1]}
     local extra=()
     stop_client "$i"
+    # vpnc-script may remove its gateway exception on disconnect. Restore only
+    # the declared underlay endpoint routes, never a route to the inner targets.
+    ip -n "$c" route replace 203.0.113.2/32 via 192.0.2.1
+    ip -n "$c" -6 route replace fd42:20::2/128 via fd42:10::1
     client_modes[$i]=$mode
     rm -f "$state/c$i/connected"
     [[ $mode != tls ]] || extra+=(--no-dtls)
     export VPNC_STATE_DIR="$state/c$i"
     ip netns exec "$c" openconnect --protocol anyconnect --non-inter --no-proxy \
         --no-system-trust --cafile /etc/ocserv/ssl/ca-cert.pem --user "load-$i" \
-        --passwd-on-stdin --interface vpntest --reconnect-timeout 5 --mtu 1280 \
+        --passwd-on-stdin --interface vpntest --reconnect-timeout 5 \
         --script "exec bash $repo/tests/vpn-vpnc.sh" "${extra[@]}" \
         https://vpn-fixture.invalid:4443/ < "$state/password" > "$state/c$i/client.log" 2>&1 &
     client_pids[$i]=$!

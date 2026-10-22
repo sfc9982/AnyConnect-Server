@@ -54,6 +54,8 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/native-logs"
           sudo modprobe tun
+          sudo modprobe ip6table_filter
+          sudo modprobe ip6table_nat
           docker run --rm --privileged --device /dev/net/tun \
             -v "$GITHUB_WORKSPACE:/workspace:ro" -v "$RUNNER_TEMP/native-logs:/reports" -w /workspace \
             -e VPN_E2E_DISPOSABLE=1 -e INSTALLER -e SECONDS_REQUESTED -e CLIENTS_REQUESTED \
