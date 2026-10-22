@@ -69,6 +69,8 @@ up() {
     # Preserve RA-learned uplinks when enabling forwarding; do not override an
     # administrator's accept_ra=0. Apply RA settings BEFORE forwarding.
     local iface staged
+    # Minimal images need not ship sysctl.d until a service creates it.
+    install -d -m 755 /etc/sysctl.d
     staged=$(mktemp /etc/sysctl.d/.ocserv-ipv6.XXXXXX)
     for iface in $(printf '%s\n' "$ingress" "$egress" | sort -u); do
         if [[ "$(sysctl -n "net.ipv6.conf.$iface.accept_ra")" != 0 ]]; then

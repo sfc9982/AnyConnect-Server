@@ -101,6 +101,31 @@ class FixtureTests(unittest.TestCase):
         self.assertIsNone(traffic.quantile([0] * 2000 + [1], .95))
         self.assertEqual(traffic.quantile([1, 0, 1], .95), .03)
 
+    def test_ipv6_sysctl_directory_created_on_minimal_images(self):
+        # Exercise up() unchanged except redirecting filesystem paths into a
+        # temporary tree; networking commands are controlled unit-test stubs.
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary) / 'sysctl.d'
+            helper = (ROOT.parent.parent / 'ocserv-network.sh').read_text()
+            definitions = helper.split('\n[[ "$EUID" -eq 0 ]]', 1)[0]
+            definitions = definitions.replace('/etc/sysctl.d', str(directory))
+            setup = r"""
+read_profile() { ingress=wan; egress=wan; device=vpns; pool=fd42:7::/64; tcp=4443; udp=4443; mode=routed; }
+ip() { :; }
+ip6tables() { :; }
+chain() { :; }
+rule() { :; }
+sysctl() { if [[ "$1" == -n ]]; then printf '0\n'; fi; }
+up
+up
+"""
+            result = subprocess.run(['bash', '-c', definitions + setup],
+                                    capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((directory / '90-ocserv-ipv6.conf').read_text(),
+                             'net.ipv6.conf.all.forwarding=1\n')
+            self.assertEqual(len(list(directory.iterdir())), 1)
+
     def test_udp_drop_counter_formats(self):
         # Exercise the exact parser used by the network test, with both the
         # nft numeric-protocol output and legacy symbolic-protocol output.
