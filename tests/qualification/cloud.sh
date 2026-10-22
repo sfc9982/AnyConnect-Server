@@ -74,7 +74,8 @@ args=(--non-inter --no-proxy --no-system-trust --cafile "$state/ca.pem" --user "
     --passwd-on-stdin --interface cloudvpn
     --script "exec bash $repo/tests/qualification/vpnc.sh")
 [[ "$transport" != tls ]] || args+=(--no-dtls)
-openconnect "${args[@]}" --version > /dev/null 2> "$state/cli.log" ||
+# The password option consumes stdin even in a parse-only --version run.
+openconnect "${args[@]}" --version <<< qualification-argument-check > /dev/null 2> "$state/cli.log" ||
     fail 'unsupported OpenConnect arguments; no network test was run'
 # Dedicated container counters; they do not modify the runner host firewall.
 for tool in iptables ip6tables; do

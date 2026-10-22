@@ -52,6 +52,8 @@ STATUS
     exit "$rc"
 }
 trap cleanup EXIT
+# Report location without printing BASH_COMMAND, which might contain secrets.
+trap 'rc=$?; printf "FAIL: qualification command at line %s (status %s)\n" "$LINENO" "$rc" >&2' ERR
 for candidate in /usr/share/vpnc-scripts/vpnc-script /etc/vpnc/vpnc-script /etc/openconnect/vpnc-script; do
     if [[ -x "$candidate" ]]; then VPNC_REAL_SCRIPT=$candidate; break; fi
 done
@@ -163,6 +165,7 @@ ip netns exec "$server" bash "$repo/ocserv-network.sh" up > "$state/ipv6-reapply
 ip netns exec "$server" ip6tables-save > "$state/rules-after"
 diff -u <(grep -v '^#' "$state/rules-before") <(grep -v '^#' "$state/rules-after")
 start_server() {
+    local i
     ip netns exec "$server" /usr/local/sbin/ocserv -f -c /etc/ocserv/ocserv.conf > "$state/server.log" 2>&1 &
     server_pid=$!
     for ((i=0;i<100;i++)); do
@@ -174,7 +177,7 @@ start_server() {
 }
 start_server
 stop_clients() {
-    local pid
+    local pid i
     for pid in "${client_pids[@]}"; do kill -INT "$pid" 2>/dev/null || true; done
     for pid in "${client_pids[@]}"; do
         for ((i=0;i<50;i++)); do kill -0 "$pid" 2>/dev/null || break; sleep .1; done
@@ -184,7 +187,7 @@ stop_clients() {
     client_pids=()
 }
 connect() {
-    local n=$1 outer=$2 transport=$3 label=$4 ns address
+    local n=$1 outer=$2 transport=$3 label=$4 ns address i
     probe_transport=$transport
     ns=q-c$n-$$
     address=198.18.0.2; [[ "$outer" != 6 ]] || address=2001:db8:1::2
@@ -198,7 +201,9 @@ connect() {
     [[ "$transport" != tls ]] || args+=(--no-dtls)
     # Parse the actual argument vector without connecting. Unsupported client
     # options are setup errors, never an expected policy/authentication failure.
-    openconnect "${args[@]}" --version > /dev/null 2> "$state/$label-cli.log" ||
+    # --passwd-on-stdin is processed during option parsing, before --version.
+    # Supply a dummy line for that parse-only run, never the account password.
+    openconnect "${args[@]}" --version <<< qualification-argument-check > /dev/null 2> "$state/$label-cli.log" ||
         fail "$label unsupported OpenConnect arguments"
     ip netns exec "$ns" env VPNC_STATE_DIR="$state/client-$n" openconnect "${args[@]}" \
         https://vpn-qualification.test:4443/ < "$state/password-$n" > /dev/null 2> "$state/$label-$n.log" &
@@ -284,7 +289,7 @@ for ((n=0;n<clients;n++)); do
     transport=tls; ((n%2 == 0)) || transport=dtls
     soak_transports+=("$transport")
     connect "$n" "$((n%2==0 ? 4 : 6))" "$transport" soak
-done
+ done
 python3 "$repo/tests/qualification/metrics.py" --pid "$server_pid" --stop "$state/metrics.stop" \
     --output "$logs/resources.jsonl" & metrics_pid=$!
 ip -n "$server" link set ve mtu 1280
