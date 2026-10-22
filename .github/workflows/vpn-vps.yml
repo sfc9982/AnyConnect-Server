@@ -1,0 +1,71 @@
+name: Authorized external VPS validation
+
+# No pull_request, pull_request_target, schedule or arbitrary SSH/cloud commands.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: Type TEST_DISPOSABLE_VPS to authorize this endpoint probe
+        required: true
+        type: string
+      transport:
+        description: Expected transport for the operator-applied cloud firewall profile
+        type: choice
+        options: [dtls, tls, fallback]
+        default: dtls
+
+permissions:
+  contents: read
+
+jobs:
+  external:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && inputs.confirm == 'TEST_DISPOSABLE_VPS'
+    environment: vpn-vps-validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Prepare authorized endpoint configuration
+        env:
+          CONFIG: ${{ secrets.VPN_VALIDATION_CONFIG }}
+          CA: ${{ secrets.VPN_VALIDATION_CA }}
+          PASSWORD: ${{ secrets.VPN_VALIDATION_PASSWORD }}
+          TRANSPORT: ${{ inputs.transport }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          if not all(os.environ.get(k) for k in ('CONFIG', 'CA', 'PASSWORD')):
+              raise SystemExit('Required VPS validation secrets are missing; no test was run')
+          root = Path(os.environ['RUNNER_TEMP'])
+          private = root / 'vpn-private'
+          private.mkdir(mode=0o700)
+          cfg = json.loads(os.environ['CONFIG'])
+          metadata = cfg.get('metadata', {})
+          if not all(metadata.get(k) for k in ('provider', 'region', 'image', 'firewall_profile')):
+              raise SystemExit('Provider/region/image/firewall_profile metadata is required')
+          cfg.update(ca_file='/secrets/ca.pem', password_file='/secrets/password', transport=os.environ['TRANSPORT'])
+          for name, value in [('config.json', json.dumps(cfg)), ('ca.pem', os.environ['CA']), ('password', os.environ['PASSWORD'])]:
+              path = private / name
+              path.write_text(value)
+              path.chmod(0o600)
+          (root / 'vpn-results').mkdir()
+          PY
+      - name: Real external client and data transfer
+        run: |
+          sudo modprobe tun
+          docker build -t vpn-external-probe -f tests/vpn-probe.Dockerfile .
+          docker run --rm --cap-add NET_ADMIN --device /dev/net/tun -e VPN_E2E_DISPOSABLE=1 \
+            -v "$RUNNER_TEMP/vpn-private:/secrets:ro" -v "$RUNNER_TEMP/vpn-results:/reports" \
+            vpn-external-probe /secrets/config.json --report /reports/external.json
+      - name: Remove credentials
+        if: always()
+        run: sudo rm -rf "$RUNNER_TEMP/vpn-private"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: external-vps-observation
+          path: ${{ runner.temp }}/vpn-results
+          retention-days: 7

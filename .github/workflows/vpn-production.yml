@@ -1,38 +1,142 @@
-name: VPN production validation
+name: Extended VPN validation
 
 on:
+  push:
+    branches: [main]
   pull_request:
     branches: [main]
-  push:
-    branches: [main, test/ipv6-load-systemd-vps]
   workflow_dispatch:
+    inputs:
+      soak_seconds:
+        description: Sustained load duration (seconds)
+        type: choice
+        options: ['1800', '7200']
+        default: '1800'
+      soak_clients:
+        description: Simultaneous real VPN sessions
+        type: choice
+        options: ['10', '20', '50', '100']
+        default: '20'
+  schedule:
+    - cron: '17 2 * * 1-6'
+    - cron: '17 2 * * 0'
 
 permissions:
   contents: read
 
 concurrency:
-  group: vpn-production-${{ github.ref }}
-  cancel-in-progress: true
+  group: vpn-production-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   static:
-    name: Static checks and tested source
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Check shell and Python syntax
-        run: |
-          for script in ocserv*.sh tests/*.sh; do bash -n "$script"; done
-          python3 -m compileall -q tests
-          bash tests/installer-regressions.sh
-      - name: Record the exact source used by validation
-        run: git archive --format=tar HEAD > "$RUNNER_TEMP/vpn-tested-source.tar"
-      - uses: actions/upload-artifact@v4
+      - run: |
+          bash -n tests/vpn-extended.sh
+          bash -n tests/vpn-extended-setup.sh
+          bash -n tests/systemd-vm.sh
+          bash -n tests/systemd-guest.sh
+          shellcheck -S warning tests/vpn-extended*.sh tests/systemd-*.sh
+          python3 -m py_compile tests/vpn-workload.py tests/vpn-probe.py tests/extended-unit.py
+          python3 tests/extended-unit.py
+
+  network:
+    name: Dual stack and edge ACLs (${{ matrix.image }}, ${{ matrix.installer }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ['ubuntu:24.04', 'debian:12', 'rockylinux:9']
+        installer: [ocserv.sh, ocserv-en.sh]
+    steps:
+      - uses: actions/checkout@v4
         with:
-          name: vpn-tested-source
-          path: ${{ runner.temp }}/vpn-tested-source.tar
-          retention-days: 3
-          if-no-files-found: error
+          persist-credentials: false
+      - name: Real IPv6 and six-client regression load
+        env:
+          IMAGE: ${{ matrix.image }}
+          INSTALLER: ${{ matrix.installer }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/results"
+          sudo modprobe tun
+          docker run --rm --privileged --device /dev/net/tun \
+            -v "$GITHUB_WORKSPACE:/workspace:ro" -v "$RUNNER_TEMP/results:/reports" -w /workspace \
+            -e VPN_E2E_DISPOSABLE=1 -e VPN_E2E_LOG_DIR=/reports \
+            -e VPN_SOAK_SECONDS=60 -e VPN_SOAK_CLIENTS=6 -e INSTALLER \
+            "$IMAGE" bash -c 'set -e; bash tests/vpn-install.sh "$INSTALLER"; bash tests/vpn-extended.sh "$INSTALLER"'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dual-stack-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/results
+          retention-days: 7
+
+  reboot:
+    name: Real systemd VM reboot (${{ matrix.installer }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        installer: [ocserv.sh, ocserv-en.sh]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install VM tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils openssh-client
+          sudo modprobe tun
+      - name: Normal installer, service lifecycle, reboot and external VPN traffic
+        env:
+          INSTALLER: ${{ matrix.installer }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/results"
+          sudo env VPN_E2E_DISPOSABLE=1 VPN_E2E_LOG_DIR="$RUNNER_TEMP/results" \
+            bash tests/systemd-vm.sh "$INSTALLER"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: systemd-vm-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/results
+          retention-days: 7
+
+  soak:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: Sustained mixed TLS/DTLS load (${{ matrix.installer }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        installer: [ocserv.sh, ocserv-en.sh]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Bounded sustained data-plane workload
+        env:
+          INSTALLER: ${{ matrix.installer }}
+          VPN_SOAK_SECONDS: ${{ inputs.soak_seconds || (github.event.schedule == '17 2 * * 0' && '7200' || '1800') }}
+          VPN_SOAK_CLIENTS: ${{ inputs.soak_clients || '20' }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/results"
+          sudo modprobe tun
+          docker run --rm --privileged --device /dev/net/tun \
+            -v "$GITHUB_WORKSPACE:/workspace:ro" -v "$RUNNER_TEMP/results:/reports" -w /workspace \
+            -e VPN_E2E_DISPOSABLE=1 -e VPN_E2E_LOG_DIR=/reports \
+            -e VPN_SOAK_SECONDS -e VPN_SOAK_CLIENTS -e INSTALLER \
+            ubuntu:24.04 bash -c 'set -e; bash tests/vpn-install.sh "$INSTALLER"; bash tests/vpn-extended.sh "$INSTALLER"'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: soak-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/results
+          retention-days: 14
