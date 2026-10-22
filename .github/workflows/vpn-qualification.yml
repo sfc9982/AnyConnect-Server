@@ -1,0 +1,37 @@
+name: VPN production qualification
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vpn-qualification-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source:
+    name: Qualification source snapshot
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record reproducible source and revision
+        run: |
+          mkdir -p "$RUNNER_TEMP/qualification-source"
+          git archive --format=tar HEAD | gzip > "$RUNNER_TEMP/qualification-source/source.tar.gz"
+          git rev-parse HEAD > "$RUNNER_TEMP/qualification-source/revision.txt"
+          sha256sum "$RUNNER_TEMP/qualification-source/source.tar.gz" > "$RUNNER_TEMP/qualification-source/SHA256SUMS"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qualification-source
+          path: ${{ runner.temp }}/qualification-source
+          retention-days: 7
+          if-no-files-found: error
