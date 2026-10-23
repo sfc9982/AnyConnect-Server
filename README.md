@@ -2,21 +2,91 @@
 
 [简体中文](/README.zh-CN.md)
 
-CI status (latest `main` runs):
-
-[![Distro smoke](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/distro-test.yml/badge.svg?branch=main)](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/distro-test.yml?query=branch%3Amain)
-[![VPN E2E](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-e2e.yml/badge.svg?branch=main)](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-e2e.yml?query=branch%3Amain)
-[![Extended VPN](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-production.yml/badge.svg?branch=main)](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-production.yml?query=branch%3Amain)
-[![IPv6 & boot](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-native.yml/badge.svg?branch=main)](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-native.yml?query=branch%3Amain)
-[![Installer regressions](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-source.yml/badge.svg?branch=main)](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-source.yml?query=branch%3Amain)
-[![Lint](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/lint.yml?query=branch%3Amain)
-
 One-click deployment of an **SSL VPN server compatible with the official Cisco AnyConnect client** on Linux. Once deployed, phones and computers connect using Cisco's official AnyConnect client — no third-party app required.
 
 - Server: ocserv 1.5.0 (the official OpenConnect server implementation, compiled from source into /usr/local)
 - Client: the official Cisco AnyConnect client (Windows / macOS / Android / iOS / Linux)
 - Accounts: client certificate + password, two independent channels; deleting a user permanently revokes the certificate, suspension can be lifted at any time
 - Auth and revocation changes take effect immediately — no service restart needed
+
+<!-- ci-status:start -->
+
+## CI status
+
+Live status of the latest `push` runs on `main`. Click a badge to open the matching workflow history.
+
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <p><strong>Code quality</strong><br><sub>ShellCheck · Bash and Python syntax</sub></p>
+      <a href="https://github.com/sfc9982/AnyConnect-Server/actions/workflows/lint.yml?query=branch%3Amain+event%3Apush">
+        <img src="https://github.com/sfc9982/AnyConnect-Server/actions/workflows/lint.yml/badge.svg?branch=main&amp;event=push" alt="Code quality · main · push">
+      </a>
+    </td>
+    <td width="50%" align="center">
+      <p><strong>Installer regressions</strong><br><sub>Failure recovery · exact tested source</sub></p>
+      <a href="https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-source.yml?query=branch%3Amain+event%3Apush">
+        <img src="https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-source.yml/badge.svg?branch=main&amp;event=push" alt="Installer regressions · main · push">
+      </a>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <p><strong>Distro smoke tests</strong><br><sub>9 Linux distributions · both installers</sub></p>
+      <a href="https://github.com/sfc9982/AnyConnect-Server/actions/workflows/distro-test.yml?query=branch%3Amain+event%3Apush">
+        <img src="https://github.com/sfc9982/AnyConnect-Server/actions/workflows/distro-test.yml/badge.svg?branch=main&amp;event=push" alt="Distro smoke tests · main · push">
+      </a>
+    </td>
+    <td width="50%" align="center">
+      <p><strong>Real VPN end-to-end</strong><br><sub>TLS / DTLS · DNS / NAT · account lifecycle</sub></p>
+      <a href="https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-e2e.yml?query=branch%3Amain+event%3Apush">
+        <img src="https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-e2e.yml/badge.svg?branch=main&amp;event=push" alt="Real VPN end-to-end · main · push">
+      </a>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <p><strong>Native IPv6 &amp; boot</strong><br><sub>Routed IPv6 · Ubuntu 22.04 VM reboots</sub></p>
+      <a href="https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-native.yml?query=branch%3Amain+event%3Apush">
+        <img src="https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-native.yml/badge.svg?branch=main&amp;event=push" alt="Native IPv6 &amp; boot · main · push">
+      </a>
+    </td>
+    <td width="50%" align="center">
+      <p><strong>Extended VPN validation</strong><br><sub>Dual-stack traffic · edge ACLs · Ubuntu 24.04 reboots</sub></p>
+      <a href="https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-production.yml?query=branch%3Amain+event%3Apush">
+        <img src="https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-production.yml/badge.svg?branch=main&amp;event=push" alt="Extended VPN validation · main · push">
+      </a>
+    </td>
+  </tr>
+</table>
+
+<details>
+<summary>Scheduled and manual validation</summary>
+
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <p><strong>Scheduled soak</strong><br><sub>20 clients · 30 minutes; 2 hours on Sundays</sub></p>
+      <a href="https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-production.yml?query=branch%3Amain+event%3Aschedule">
+        <img src="https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-production.yml/badge.svg?branch=main&amp;event=schedule" alt="Scheduled soak · main · schedule">
+      </a>
+    </td>
+    <td width="50%" align="center">
+      <p><strong>External VPS probe</strong><br><sub>Manual authorization · disposable owned endpoint</sub></p>
+      <a href="https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-vps.yml?query=branch%3Amain+event%3Aworkflow_dispatch">
+        <img src="https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-vps.yml/badge.svg?branch=main&amp;event=workflow_dispatch" alt="External VPS probe · main · workflow_dispatch">
+      </a>
+    </td>
+  </tr>
+</table>
+
+These badges track scheduled and manually dispatched workflows separately. A passing regular CI run does not mean a long soak or VPS probe ran. No matching run or a skipped job is not a pass; check job results and artifacts for the actual scope and duration.
+
+</details>
+
+[All workflow runs](https://github.com/sfc9982/AnyConnect-Server/actions?query=branch%3Amain) · [Core test coverage](tests/README.md) · [Extended tests and limitations](tests/EXTENDED-TESTS.md)
+
+<!-- ci-status:end -->
 
 ## Features
 

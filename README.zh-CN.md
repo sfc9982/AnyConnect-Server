@@ -2,21 +2,91 @@
 
 [English Version](/README.md)
 
-CI 状态（`main` 分支最新运行结果）：
-
-[![Distro smoke](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/distro-test.yml/badge.svg?branch=main)](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/distro-test.yml?query=branch%3Amain)
-[![VPN E2E](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-e2e.yml/badge.svg?branch=main)](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-e2e.yml?query=branch%3Amain)
-[![Extended VPN](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-production.yml/badge.svg?branch=main)](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-production.yml?query=branch%3Amain)
-[![IPv6 & boot](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-native.yml/badge.svg?branch=main)](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-native.yml?query=branch%3Amain)
-[![Installer regressions](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-source.yml/badge.svg?branch=main)](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-source.yml?query=branch%3Amain)
-[![Lint](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/lint.yml?query=branch%3Amain)
-
 在 Linux 服务器上一键部署**与 Cisco AnyConnect 官方客户端兼容的 SSL VPN**。部署完成后，手机和电脑直接使用思科官方的 AnyConnect 客户端即可连接，无需安装任何第三方 App。
 
 - 服务端：ocserv 1.5.0（OpenConnect 官方服务端实现，源码编译安装至 /usr/local）
 - 客户端：Cisco AnyConnect 官方客户端（Windows / macOS / Android / iOS / Linux）
 - 账号体系：客户端证书 + 账号密码双通道；删除用户即永久吊销证书，临时禁用可随时恢复
 - 认证与吊销变更实时生效，无需重启服务
+
+<!-- ci-status:start -->
+
+## CI 状态
+
+实时显示 `main` 分支最近一次 `push` 触发的检查结果。点击状态徽章可查看对应工作流的运行记录。
+
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <p><strong>代码质量</strong><br><sub>ShellCheck · Bash / Python 语法</sub></p>
+      <a href="https://github.com/sfc9982/AnyConnect-Server/actions/workflows/lint.yml?query=branch%3Amain+event%3Apush">
+        <img src="https://github.com/sfc9982/AnyConnect-Server/actions/workflows/lint.yml/badge.svg?branch=main&amp;event=push" alt="代码质量 · main · push">
+      </a>
+    </td>
+    <td width="50%" align="center">
+      <p><strong>安装器回归</strong><br><sub>故障恢复 · 受测源码快照</sub></p>
+      <a href="https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-source.yml?query=branch%3Amain+event%3Apush">
+        <img src="https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-source.yml/badge.svg?branch=main&amp;event=push" alt="安装器回归 · main · push">
+      </a>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <p><strong>发行版 smoke 测试</strong><br><sub>9 个 Linux 发行版 · 中英文脚本</sub></p>
+      <a href="https://github.com/sfc9982/AnyConnect-Server/actions/workflows/distro-test.yml?query=branch%3Amain+event%3Apush">
+        <img src="https://github.com/sfc9982/AnyConnect-Server/actions/workflows/distro-test.yml/badge.svg?branch=main&amp;event=push" alt="发行版 smoke 测试 · main · push">
+      </a>
+    </td>
+    <td width="50%" align="center">
+      <p><strong>真实 VPN 端到端测试</strong><br><sub>TLS / DTLS · DNS / NAT · 账号生命周期</sub></p>
+      <a href="https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-e2e.yml?query=branch%3Amain+event%3Apush">
+        <img src="https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-e2e.yml/badge.svg?branch=main&amp;event=push" alt="真实 VPN 端到端测试 · main · push">
+      </a>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <p><strong>原生 IPv6 与开机启动</strong><br><sub>IPv6 路由转发 · Ubuntu 22.04 虚拟机重启</sub></p>
+      <a href="https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-native.yml?query=branch%3Amain+event%3Apush">
+        <img src="https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-native.yml/badge.svg?branch=main&amp;event=push" alt="原生 IPv6 与开机启动 · main · push">
+      </a>
+    </td>
+    <td width="50%" align="center">
+      <p><strong>扩展 VPN 验证</strong><br><sub>双栈传输 · 边界 ACL · Ubuntu 24.04 重启</sub></p>
+      <a href="https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-production.yml?query=branch%3Amain+event%3Apush">
+        <img src="https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-production.yml/badge.svg?branch=main&amp;event=push" alt="扩展 VPN 验证 · main · push">
+      </a>
+    </td>
+  </tr>
+</table>
+
+<details>
+<summary>定时压测与手动验证（展开）</summary>
+
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <p><strong>定时持续压测</strong><br><sub>20 个客户端 · 常规 30 分钟，周日 2 小时</sub></p>
+      <a href="https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-production.yml?query=branch%3Amain+event%3Aschedule">
+        <img src="https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-production.yml/badge.svg?branch=main&amp;event=schedule" alt="定时持续压测 · main · schedule">
+      </a>
+    </td>
+    <td width="50%" align="center">
+      <p><strong>真实 VPS 外部验证</strong><br><sub>手动授权 · 自有可销毁测试端点</sub></p>
+      <a href="https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-vps.yml?query=branch%3Amain+event%3Aworkflow_dispatch">
+        <img src="https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-vps.yml/badge.svg?branch=main&amp;event=workflow_dispatch" alt="真实 VPS 外部验证 · main · workflow_dispatch">
+      </a>
+    </td>
+  </tr>
+</table>
+
+这里单独展示定时任务和手动任务的状态。常规 CI 通过不代表长时压测或 VPS 验证已经执行；没有匹配记录或任务被跳过均不等于通过，实际范围与时长以任务结果和测试产物为准。
+
+</details>
+
+[全部工作流](https://github.com/sfc9982/AnyConnect-Server/actions?query=branch%3Amain) · [基础测试覆盖](tests/README.md) · [扩展测试与边界](tests/EXTENDED-TESTS.md)
+
+<!-- ci-status:end -->
 
 ## 功能特性
 
@@ -176,7 +246,7 @@ A：多数是 VPS 提供商的「安全组 / 防火墙」未放行端口。请�
 A：自签名证书的正常现象，连接时选择继续即可；也可在客户端导入服务器上的 `ca-cert.pem` 根证书以消除警告。
 
 **Q：客户端提示没有可用证书？**
-A：`.p12` 未正确导入。请按上文对应平台的步骤重新导入；iOS 还需在「证书信任设置」中打开信任开关。
+A：`.p12` 未正确导入。请按上文对应平台的步骤重新导入；iOS 还需在证书信任设置里打开信任开关。
 
 **Q：手机频繁断线，或视频卡顿？**
 A：确认 UDP 端口已放行（DTLS 数据走 UDP）。部分网络对 UDP 限速时，可在客户端设置中切换为仅使用 TCP。
