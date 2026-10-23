@@ -2,6 +2,15 @@
 
 [简体中文](/README.zh-CN.md)
 
+CI status (latest `main` runs):
+
+[![Distro smoke](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/distro-test.yml/badge.svg?branch=main)](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/distro-test.yml?query=branch%3Amain)
+[![VPN E2E](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-e2e.yml/badge.svg?branch=main)](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-e2e.yml?query=branch%3Amain)
+[![Extended VPN](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-production.yml/badge.svg?branch=main)](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-production.yml?query=branch%3Amain)
+[![IPv6 & boot](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-native.yml/badge.svg?branch=main)](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-native.yml?query=branch%3Amain)
+[![Installer regressions](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-source.yml/badge.svg?branch=main)](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/vpn-source.yml?query=branch%3Amain)
+[![Lint](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/sfc9982/AnyConnect-Server/actions/workflows/lint.yml?query=branch%3Amain)
+
 One-click deployment of an **SSL VPN server compatible with the official Cisco AnyConnect client** on Linux. Once deployed, phones and computers connect using Cisco's official AnyConnect client — no third-party app required.
 
 - Server: ocserv 1.5.0 (the official OpenConnect server implementation, compiled from source into /usr/local)
