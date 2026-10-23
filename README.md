@@ -1,13 +1,89 @@
-# AnyConnect-Server
+<div align="center">
 
-[简体中文](/README.zh-CN.md)
+<a href="https://github.com/sfc9982/AnyConnect-Server"><img src="https://img.shields.io/badge/SELF--HOSTED-SSL%20VPN-0F766E?style=for-the-badge&logo=linux&logoColor=white" alt="Self-hosted SSL VPN"></a>
 
-One-click deployment of an **SSL VPN server compatible with the official Cisco AnyConnect client** on Linux. Once deployed, phones and computers connect using Cisco's official AnyConnect client — no third-party app required.
+<h1>AnyConnect-Server</h1>
 
-- Server: ocserv 1.5.0 (the official OpenConnect server implementation, compiled from source into /usr/local)
-- Client: the official Cisco AnyConnect client (Windows / macOS / Android / iOS / Linux)
-- Accounts: client certificate + password, two independent channels; deleting a user permanently revokes the certificate, suspension can be lifted at any time
-- Auth and revocation changes take effect immediately — no service restart needed
+<p><strong>Deploy and manage your own SSL VPN on Linux.</strong></p>
+<p>Powered by <a href="https://www.infradead.org/ocserv/">ocserv</a> · AnyConnect-compatible protocol · TLS / DTLS · Certificate + password</p>
+
+<p>
+<a href="https://github.com/sfc9982/AnyConnect-Server/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-334155?style=flat-square" alt="MIT License"></a>
+<img src="https://img.shields.io/badge/ocserv-1.5.0-2563EB?style=flat-square" alt="ocserv 1.5.0">
+<img src="https://img.shields.io/badge/Installer-Bash-0F766E?style=flat-square&logo=gnubash&logoColor=white" alt="Bash installer">
+<img src="https://img.shields.io/badge/IPv6-Opt--in-7C3AED?style=flat-square" alt="IPv6 opt-in">
+</p>
+
+<p><a href="#quick-start"><strong>Quick start</strong></a> · <a href="#ci-status">CI status</a> · <a href="#supported-systems">Supported systems</a> · <a href="#security-notes">Security notes</a> · <a href="README.zh-CN.md">简体中文</a></p>
+
+</div>
+
+> [!NOTE]
+> This project uses open-source ocserv, not Cisco's proprietary server. It is not affiliated with or endorsed by Cisco. CI tests OpenConnect clients; behavior of specific Cisco client versions may differ.
+
+## Highlights
+
+<table>
+<tr>
+<td width="50%" valign="top"><strong>One-command setup</strong><p>Detect Linux, build ocserv, configure certificates, firewall and service.</p></td>
+<td width="50%" valign="top"><strong>Account lifecycle</strong><p>Issue per-user .p12 certificates; suspend, restore or revoke access.</p></td>
+</tr>
+<tr>
+<td width="50%" valign="top"><strong>TLS + DTLS</strong><p>Encrypted tunneling with optional IPv6 routing and default split routes.</p></td>
+<td width="50%" valign="top"><strong>Real integration tests</strong><p>Linux distro matrix, IPv6 edge tests, soak tests and systemd VM reboot checks.</p></td>
+</tr>
+</table>
+
+## Requirements
+
+| Item | Requirement |
+|---|---|
+| Server | A VPS with a dedicated public IP (KVM / Xen or other full virtualization) |
+| OS | See the supported list below; systemd-based (default on mainstream distros) |
+| Virtual NIC | TUN/TAP enabled (checked automatically during install) |
+| Privileges | Able to run commands as root (or an account with sudo) |
+| Domain name | Optional. A plain IP works; a domain name makes certificates and daily use nicer |
+
+## Supported systems
+
+| Distro | Versions | Package manager |
+|---|---|---|
+| Debian | 11 / 12 | apt |
+| Ubuntu | 20.04 / 22.04 / 24.04 | apt |
+| RHEL / CentOS / Rocky / AlmaLinux / OpenEuler etc. | 8 / 9 and later | dnf / yum (EPEL) |
+| Fedora | 38+ | dnf |
+| Arch Linux / Manjaro | rolling | pacman |
+| openSUSE Leap | 15 | zypper |
+
+Note: systems without systemd may lack boot autostart. CI explicitly covers Ubuntu 22.04/24.04, Debian 11/12, Fedora 40, Rocky 9, AlmaLinux 9, Arch Linux and openSUSE Leap; not every listed variant is tested.
+
+## Quick start
+
+Run the installer on a VPS you control with TUN/TAP enabled. Build time depends on your CPU and network.
+
+```bash
+# 1. SSH into the server and become root
+sudo su
+
+# 2. Download and run the script
+wget -N https://raw.githubusercontent.com/sfc9982/AnyConnect-Server/main/ocserv-en.sh
+chmod +x ocserv-en.sh
+bash ocserv-en.sh
+```
+
+Enter `1` to start the installation. The script will ask a few questions along the way:
+
+| Prompt | Meaning | Suggestion |
+|---|---|---|
+| VPN username | The first account, default `admin` | Pick a name only you know |
+| VPN password | Required, hidden while typing | Use a strong password; it doubles as the .p12 export password |
+| TCP port | Default 443 | Keep 443 — the least likely to be blocked |
+| UDP port | Same as TCP by default | Keep the default; the UDP channel affects voice/video quality |
+
+When the installation finishes, the script prints your server info. The address to enter in the client looks like `123.45.67.89:443`.
+
+> [!TIP]
+> Review the script before running it as root. Allow incoming TCP and UDP on your chosen VPN port in both the host firewall and provider security group.
 
 <!-- ci-status:start -->
 
@@ -84,67 +160,21 @@ These badges track scheduled and manually dispatched workflows separately. A pas
 
 </details>
 
-[All workflow runs](https://github.com/sfc9982/AnyConnect-Server/actions?query=branch%3Amain) · [Core test coverage](tests/README.md) · [Extended tests and limitations](tests/EXTENDED-TESTS.md)
+[All workflow runs](https://github.com/sfc9982/AnyConnect-Server/actions?query=branch%3Amain) · [Core test coverage](tests/README.md) · [Extended tests and limitations](tests/EXTENDED-TESTS.md)<!-- ci-status:end -->
 
-<!-- ci-status:end -->
+## How it works
 
-## Features
+~~~mermaid
+flowchart LR
+    A["VPN client"] --> B{"Client routing policy"}
+    B -->|"VPN routes"| C["TLS / DTLS"]
+    B -->|"Excluded routes"| D["Local network"]
+    C --> E["ocserv"]
+    E --> F["IPv4 NAT / routed IPv6"]
+    F --> G["Destinations"]
+~~~
 
-- One command deploys everything: build, certificates, firewall NAT, systemd service, first account
-- One client certificate bundle (.p12) per user, imported directly by the Cisco client
-- Full certificate lifecycle: add / delete (permanent revoke) / suspend / restore
-- The Certificate Revocation List (CRL) is rebuilt automatically and hot-reloaded by the server
-- Split tunneling by default: a built-in direct-route table keeps domestic traffic off the VPN while the rest goes through it
-- Cross-distro: Debian / Ubuntu / RHEL family / Fedora / Arch / openSUSE
-- No third-party script is downloaded during installation (systemd units are generated inline)
-
-## Requirements
-
-| Item | Requirement |
-|---|---|
-| Server | A VPS with a dedicated public IP (KVM / Xen or other full virtualization) |
-| OS | See the supported list below; systemd-based (default on mainstream distros) |
-| Virtual NIC | TUN/TAP enabled (checked automatically during install) |
-| Privileges | Able to run commands as root (or an account with sudo) |
-| Domain name | Optional. A plain IP works; a domain name makes certificates and daily use nicer |
-
-## Supported systems
-
-| Distro | Versions | Package manager |
-|---|---|---|
-| Debian | 11 / 12 | apt |
-| Ubuntu | 20.04 / 22.04 / 24.04 | apt |
-| RHEL / CentOS / Rocky / AlmaLinux / OpenEuler etc. | 8 / 9 and later | dnf / yum (EPEL) |
-| Fedora | 38+ | dnf |
-| Arch Linux / Manjaro | rolling | pacman |
-| openSUSE Leap | 15 | zypper |
-
-Note: minimal environments without systemd (Docker / OpenVZ) still work, but without boot autostart.
-
-## Quick start (about 5 minutes)
-
-Most of the time is spent waiting for the build.
-
-```bash
-# 1. SSH into the server and become root
-sudo su
-
-# 2. Download and run the script
-wget -N https://raw.githubusercontent.com/sfc9982/AnyConnect-Server/main/ocserv-en.sh
-chmod +x ocserv-en.sh
-bash ocserv-en.sh
-```
-
-Enter `1` to start the installation. The script will ask a few questions along the way:
-
-| Prompt | Meaning | Suggestion |
-|---|---|---|
-| VPN username | The first account, default `admin` | Pick a name only you know |
-| VPN password | Required, hidden while typing | Use a strong password; it doubles as the .p12 export password |
-| TCP port | Default 443 | Keep 443 — the least likely to be blocked |
-| UDP port | Same as TCP by default | Keep the default; the UDP channel affects voice/video quality |
-
-When the installation finishes, the script prints your server info. The address to enter in the client looks like `123.45.67.89:443`.
+The routing decision happens on the client: excluded prefixes stay local. IPv6 is opt-in; it requires a routed VPN prefix and upstream return route, and does not automatically configure NAT66.
 
 ## What the installer does
 
@@ -170,12 +200,12 @@ The import password is that user's VPN password.
 - **Windows**: double-click the `.p12` → Current User → enter the password → finish the wizard.
 - **macOS**: double-click to import into the "login" keychain, then confirm it exists in Keychain Access.
 - **Android**: copy the file to phone storage → Settings → Security → Encryption & credentials → Install from storage (some vendors put this under "More security settings") → enter the password.
-- **iOS / iPadOS**: send the file to the device (AirDrop / Files app / mail) → tap it → Settings → General → VPN & Device Management → install the profile; then go to Settings → General → About → Certificate Trust Settings and enable trust for that certificate.
+- **iOS / iPadOS**: send the file to the device (AirDrop / Files app / mail) → tap it → Settings → General → VPN & Device Management → install the profile. Import the verified server CA separately if needed; the iOS root-CA trust switch does not apply to the client `.p12`.
 
 ### Step 2: connect
 
 1. Open AnyConnect and enter `server-IP:port` (e.g. `123.45.67.89:443`; use the domain name if you have one)
-2. The first connection may warn that the certificate is untrusted — this is expected with a self-signed CA; choose to continue (to remove the warning, also import and trust `/etc/ocserv/ssl/ca-cert.pem` on the client)
+2. If the server certificate is untrusted, obtain and verify `/etc/ocserv/ssl/ca-cert.pem` via a trusted channel before trusting that CA; do not dismiss an unexpected warning
 3. When asked to pick a certificate, choose the one named after your username
 4. Enter your username and password, then connect
 5. "Connected" means success
@@ -228,54 +258,101 @@ Key points about account management:
 
 ## Security notes
 
-1. **A certificate is an identity**: obtaining a user's `.p12` and password lets you connect as that user. Distribute bundles over secure channels; if one leaks, delete the user immediately (which revokes the certificate)
-2. **The CA private key stays on the server**: `/etc/ocserv/ssl/ca-key.pem` is mode 600. Anyone holding it can forge your VPN server — do not share it or back it up to untrusted locations
-3. **The protocol is fingerprintable**: traffic is encrypted, but the AnyConnect protocol itself is relatively easy to identify with deep packet inspection (DPI). If VPN usage is monitored or restricted in your environment, evaluate the risks before deploying. This tool provides transport encryption, not anonymity
-4. **Self-signed certificates**: no CA backing, so clients cannot verify the server's authenticity. Accept the first-connection warning, or replace with a trusted certificate once you have a domain name
-5. **Other advice**: use strong passwords; remove accounts you no longer need; keep the system and ocserv reasonably up to date
+> [!IMPORTANT]
+> **Verify the server certificate before trusting it.** The installer creates a private CA. Obtain `ca-cert.pem` through a trusted channel and confirm the server identity; do not blindly bypass unexpected warnings.
+
+- Keep `ca-key.pem` private. Never upload credentials, `.p12` bundles or session cookies to public logs.
+- Distribute client bundles securely and revoke exposed certificates.
+- VPN encrypts traffic but is not anonymity software; split-tunnel exclusions remain on the local network.
+- Maintain OS updates, strong passwords, restricted admin access and cloud firewall rules.
 
 ## FAQ
 
-**Q: The installer says TUN/TAP is missing?**
+<details>
+<summary><strong>Q: The installer says TUN/TAP is missing?</strong></summary>
+
 A: `/dev/net/tun` was not found. Enable TUN/TAP in your VPS control panel; on OpenVZ ask your provider to enable it, or move to a KVM / Xen based VPS.
 
-**Q: The client connects but web pages will not load?**
+</details>
+
+<details>
+<summary><strong>Q: The client connects but web pages will not load?</strong></summary>
+
 A: Usually the provider's security group / firewall has not opened the port. Allow TCP and UDP 443 (or your custom port) in the provider console.
 
-**Q: "Certificate untrusted / unable to verify server"?**
-A: Expected with a self-signed CA — continue at the connection prompt, or import the server's `ca-cert.pem` on the client to silence the warning.
+</details>
 
-**Q: The client says no certificate is available?**
-A: The `.p12` was not imported correctly. Re-import following the platform steps above; on iOS also enable trust in Certificate Trust Settings.
+<details>
+<summary><strong>Q: "Certificate untrusted / unable to verify server"?</strong></summary>
 
-**Q: Frequent disconnects or choppy video on mobile?**
+A: Verify and import the server's CA through a trusted channel, then check its hostname/IP; do not bypass verification.
+
+</details>
+
+<details>
+<summary><strong>Q: The client says no certificate is available?</strong></summary>
+
+A: Re-import the `.p12` and ensure the VPN app can use the client identity. The iOS root-CA trust switch is separate.
+
+</details>
+
+<details>
+<summary><strong>Q: Frequent disconnects or choppy video on mobile?</strong></summary>
+
 A: Make sure the UDP port is open (DTLS uses UDP). On networks that throttle UDP, switch the client to TCP-only.
 
-**Q: What if I change server or IP?**
+</details>
+
+<details>
+<summary><strong>Q: What if I change server or IP?</strong></summary>
+
 A: The server certificate is bound to the IP, so reinstall on the new server and redistribute the certificate bundles.
 
-**Q: I forgot my account password?**
+</details>
+
+<details>
+<summary><strong>Q: I forgot my account password?</strong></summary>
+
 A: Menu 6 → delete the user → add a new one. The old certificate is revoked at the same time.
 
-**Q: How do I change the port?**
+</details>
+
+<details>
+<summary><strong>Q: How do I change the port?</strong></summary>
+
 A: Menu 8, edit `tcp-port` / `udp-port` in the config; firewall rules sync automatically, then restart the service.
 
-**Q: How do I back everything up?**
+</details>
+
+<details>
+<summary><strong>Q: How do I back everything up?</strong></summary>
+
 A: Back up the entire `/etc/ocserv` directory (config, certificates and accounts).
 
-**Q: How do I upgrade ocserv itself?**
+</details>
+
+<details>
+<summary><strong>Q: How do I upgrade ocserv itself?</strong></summary>
+
 A: Menu 0 only updates the management script. To upgrade ocserv, uninstall and reinstall — back up `/etc/ocserv` first.
 
-## Tests
+</details>
 
-CI includes distro smoke checks and real VPN end-to-end tests. The latter builds
-ocserv from each installer, connects with OpenConnect, verifies TCP/DTLS traffic,
-DNS and NAT, and exercises account disable/restore/delete and saved-session
-cookie invalidation. See
-[tests/README.md](tests/README.md) for coverage, local commands, and test boundaries.
-Fault-injection and concurrent-account checks cover interrupted operations and
-safe retries. The traffic fixture uses production helpers and starts the daemon
-directly; systemd boot behavior is outside this suite.
+## Testing and verification
+
+GitHub Actions runs real end-to-end VPN clients as well as static checks. These badges report workflows, not universal production readiness.
+
+| Suite | Coverage |
+|---|---|
+| Distro smoke | 9 Linux distributions, both installers |
+| VPN E2E | Real connections, account lifecycle, DNS / NAT |
+| IPv6 / Edge ACL | IPv6 routes, forwarding and simulated external firewall |
+| systemd / Reboot | QEMU boot and service recovery |
+| Soak | Mixed TLS / DTLS concurrent clients and traffic integrity |
+
+The network fixtures validate IPv4 NAT, routed IPv6, DNS, TLS/DTLS, forwarding failures and independent client sessions. Real QEMU guests check service restart and reboot behavior. CI soak tests report concurrent clients and actual transferred bytes. **No simulated edge ACL guarantees the behavior of an actual cloud provider.** VPS probing is manual, authorized and limited to disposable endpoints.
+
+[Core tests](tests/README.md) · [Extended test details](tests/EXTENDED-TESTS.md)
 
 ## Credits and license
 
