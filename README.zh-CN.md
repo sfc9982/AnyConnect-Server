@@ -14,7 +14,7 @@
 <img src="https://img.shields.io/badge/IPv6-Opt--in-7C3AED?style=flat-square" alt="IPv6 opt-in">
 </p>
 
-<p><a href="#快速开始"><strong>快速开始</strong></a> · <a href="#ci-状态">CI 状态</a> · <a href="#支持的系统">支持的系统</a> · <a href="#安全说明">安全说明</a> · <a href="README.md">English</a></p>
+<p><a href="#快速开始"><strong>快速开始</strong></a> · <a href="#ci-状态">CI 状态</a> · <a href="#支持的系统">支持的系统</a> · <a href="#安全说明">安全说明</a> · <a href="README.md">English</a> · <a href="README.fa-IR.md" lang="fa" dir="rtl">فارسی</a></p>
 
 </div>
 
@@ -160,7 +160,9 @@ bash ocserv.sh
 
 </details>
 
-[全部工作流](https://github.com/sfc9982/AnyConnect-Server/actions?query=branch%3Amain) · [基础测试覆盖](tests/README.md) · [扩展测试与边界](tests/EXTENDED-TESTS.md)<!-- ci-status:end -->
+[全部工作流](https://github.com/sfc9982/AnyConnect-Server/actions?query=branch%3Amain) · [基础测试覆盖](tests/README.md) · [扩展测试与边界](tests/EXTENDED-TESTS.md)
+
+<!-- ci-status:end -->
 
 ## 工作原理
 

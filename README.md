@@ -14,7 +14,7 @@
 <img src="https://img.shields.io/badge/IPv6-Opt--in-7C3AED?style=flat-square" alt="IPv6 opt-in">
 </p>
 
-<p><a href="#quick-start"><strong>Quick start</strong></a> · <a href="#ci-status">CI status</a> · <a href="#supported-systems">Supported systems</a> · <a href="#security-notes">Security notes</a> · <a href="README.zh-CN.md">简体中文</a></p>
+<p><a href="#quick-start"><strong>Quick start</strong></a> · <a href="#ci-status">CI status</a> · <a href="#supported-systems">Supported systems</a> · <a href="#security-notes">Security notes</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.fa-IR.md" lang="fa" dir="rtl">فارسی</a></p>
 
 </div>
 
@@ -160,7 +160,9 @@ These badges track scheduled and manually dispatched workflows separately. A pas
 
 </details>
 
-[All workflow runs](https://github.com/sfc9982/AnyConnect-Server/actions?query=branch%3Amain) · [Core test coverage](tests/README.md) · [Extended tests and limitations](tests/EXTENDED-TESTS.md)<!-- ci-status:end -->
+[All workflow runs](https://github.com/sfc9982/AnyConnect-Server/actions?query=branch%3Amain) · [Core test coverage](tests/README.md) · [Extended tests and limitations](tests/EXTENDED-TESTS.md)
+
+<!-- ci-status:end -->
 
 ## How it works
 
